@@ -129,6 +129,20 @@ pub async fn delete_post(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let comments_deleted = sqlx::query("DELETE FROM comments WHERE post_id = $1")
+        .bind(target_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .rows_affected();
+
+    let likes_deleted = sqlx::query("DELETE FROM likes WHERE post_id = $1")
+        .bind(target_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .rows_affected();
+
     sqlx::query("DELETE FROM posts WHERE id = $1")
         .bind(target_id)
         .execute(&mut *tx)
@@ -142,6 +156,8 @@ pub async fn delete_post(
     Ok(Json(json!({
         "message": "Post deleted successfully",
         "details": {
+            "commentsDeleted": comments_deleted,
+            "likesDeleted": likes_deleted
         }
     })))
 }

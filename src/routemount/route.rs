@@ -1,3 +1,4 @@
+use crate::services::comment_service::{delete_comment, get_comments, post_comment};
 use crate::services::like_service::{get_likes, like_post, unlike_post};
 use crate::services::post_service::{
     create_post, delete_post, get_my_posts, get_post_by_id, get_posts_from_user, update_post,
@@ -29,6 +30,14 @@ pub fn create_router(pool: PgPool) -> Router<()> {
         .route(
             "/api/v1/posts/likes/:target_id",
             get(get_likes).post(like_post).delete(unlike_post),
+        )
+        .route(
+            "/api/v1/posts/comments/:target_id",
+            get(get_comments).post(post_comment),
+        )
+        .route(
+            "/api/v1/posts/comments/:target_id/:comment_id",
+            delete(delete_comment),
         )
         .with_state(pool)
 }
