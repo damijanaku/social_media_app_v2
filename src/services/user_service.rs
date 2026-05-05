@@ -139,3 +139,157 @@ pub async fn login_user(
         "access_token": access_token
     })))
 }
+
+pub async fn get_user(
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    Path(target_id): Path<Uuid>,
+) -> Result<Json<UserResponse>, (StatusCode, String)> {
+    verify_auth_token(TypedHeader(auth))
+        .await
+        .map_err(|status| (status, "Unauthorized access".to_string()))?;
+
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+        .bind(target_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    Ok(Json(UserResponse::from(user)))
+}
+
+pub async fn get_user_by_username(
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    Path(username): Path<String>,
+) -> Result<Json<UserResponse>, (StatusCode, String)> {
+    verify_auth_token(TypedHeader(auth))
+        .await
+        .map_err(|status| (status, "Unauthorized access".to_string()))?;
+
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = $1")
+        .bind(&username)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    Ok(Json(UserResponse::from(user)))
+}
+
+pub async fn update_user(
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    Json(payload): Json<UpdateUser>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = verify_auth_token(TypedHeader(auth))
+        .await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Unauthorized access".to_string()))?;
+
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
+
+    // Validating fields before building query
+    if let Some(ref username) = payload.username {
+        if username.len() < 5 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Username must be at least 5 characters long".to_string(),
+            ));
+        }
+    }
+    if let Some(ref password) = payload.password {
+        if password.len() < 8 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Password must be at least 8 characters long".to_string(),
+            ));
+        }
+    }
+
+    if payload.username.is_none()
+        && payload.email.is_none()
+        && payload.name.is_none()
+        && payload.password.is_none()
+        && payload.birthday.is_none()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "No fields provided for update".to_string(),
+        ));
+    }
+
+    let hashed_password = if let Some(ref pw) = payload.password {
+        Some(hash(pw, 12).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?)
+    } else {
+        None
+    };
+
+    let updated_user = sqlx::query_as::<_, User>(
+        "UPDATE users SET
+            username     = COALESCE($1, username),
+            email        = COALESCE($2, email),
+            name         = COALESCE($3, name),
+            password_hash = COALESCE($4, password_hash),
+            birthday     = COALESCE($5, birthday)
+         WHERE id = $6
+         RETURNING *",
+    )
+    .bind(payload.username.as_deref())
+    .bind(payload.email.as_deref())
+    .bind(payload.name.as_deref())
+    .bind(hashed_password.as_deref())
+    .bind(payload.birthday)
+    .bind(user_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("unique") || msg.contains("duplicate") {
+            (
+                StatusCode::CONFLICT,
+                "Username or email already exists".to_string(),
+            )
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, msg)
+        }
+    })?
+    .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    Ok(Json(json!({
+        "message": "User updated successfully",
+        "user": UserResponse::from(updated_user)
+    })))
+}
+
+pub async fn delete_user(
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = verify_auth_token(TypedHeader(auth))
+        .await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Unauthorized access".to_string()))?;
+
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(
+        json!({ "message": "User and all associated data deleted successfully" }),
+    ))
+}
