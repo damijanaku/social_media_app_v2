@@ -1,5 +1,6 @@
 mod models;
 mod routemount;
+mod services;
 mod utils;
 
 use sqlx::postgres::PgPoolOptions;
@@ -29,7 +30,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Successfully connected to PostgreSQL!");
 
-    let app = crate::routemount::create_router(pool);
+    let app = crate::routemount::route::create_router(pool);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     println!("Listening on http://0.0.0.0:3000");
