@@ -60,3 +60,11 @@ impl From<User> for UserResponse {
         }
     }
 }
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct Follow {
+    pub id: Uuid,
+    pub follower_id: Uuid,
+    pub followed_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}

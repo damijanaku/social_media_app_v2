@@ -1,3 +1,4 @@
+use crate::models::post_model::Post;
 use crate::models::user_model::{LoginUser, RegisterUser, UpdateUser, User, UserResponse};
 use crate::utils::jwt::{Claims, verify_auth_token};
 use axum::extract::Path;
@@ -137,6 +138,63 @@ pub async fn login_user(
         "message": "Login successful",
         "user": UserResponse::from(user),
         "access_token": access_token
+    })))
+}
+
+pub async fn my_profile(
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let claims = verify_auth_token(TypedHeader(auth)).await?;
+
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let posts = sqlx::query_as::<_, Post>(
+        "SELECT * FROM posts WHERE user_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(&pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(json!({
+        "user": UserResponse::from(user),
+        "posts": posts,
+    })))
+}
+
+pub async fn profile(
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    Path(target_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    verify_auth_token(TypedHeader(auth)).await?;
+
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+        .bind(target_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let posts = sqlx::query_as::<_, Post>(
+        "SELECT * FROM posts WHERE user_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(target_id)
+    .fetch_all(&pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(json!({
+        "user": UserResponse::from(user),
+        "posts": posts,
     })))
 }
 
@@ -309,6 +367,12 @@ pub async fn delete_user(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    sqlx::query("DELETE FROM follows WHERE follower_id = $1 OR followed_id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&mut *tx)
@@ -322,4 +386,230 @@ pub async fn delete_user(
     Ok(Json(
         json!({ "message": "User and all associated data deleted successfully" }),
     ))
+}
+
+pub async fn follow_user(
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    Path(target_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let claims = verify_auth_token(TypedHeader(auth))
+        .await
+        .map_err(|status| (status, "Unauthorized access".to_string()))?;
+
+    let follower_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
+
+    if follower_id == target_id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "You cannot follow yourself".to_string(),
+        ));
+    }
+
+    let target_exists =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+            .bind(target_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if !target_exists {
+        return Err((StatusCode::NOT_FOUND, "User not found".to_string()));
+    }
+
+    let already_following = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM follows WHERE follower_id = $1 AND followed_id = $2)",
+    )
+    .bind(follower_id)
+    .bind(target_id)
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if already_following {
+        return Err((
+            StatusCode::CONFLICT,
+            "Already following this user".to_string(),
+        ));
+    }
+
+    sqlx::query(
+        "INSERT INTO follows (id, follower_id, followed_id, created_at) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(follower_id)
+    .bind(target_id)
+    .bind(Utc::now())
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "message": "User followed successfully" })))
+}
+
+pub async fn unfollow_user(
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    Path(target_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let claims = verify_auth_token(TypedHeader(auth))
+        .await
+        .map_err(|status| (status, "Unauthorized access".to_string()))?;
+
+    let follower_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
+
+    if follower_id == target_id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "You cannot unfollow yourself".to_string(),
+        ));
+    }
+
+    let result = sqlx::query("DELETE FROM follows WHERE follower_id = $1 AND followed_id = $2")
+        .bind(follower_id)
+        .bind(target_id)
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "You are not following this user".to_string(),
+        ));
+    }
+
+    Ok(Json(json!({ "message": "User unfollowed successfully" })))
+}
+
+pub async fn get_followers(
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    Path(target_id): Path<Uuid>,
+) -> Result<Json<Vec<UserResponse>>, (StatusCode, String)> {
+    verify_auth_token(TypedHeader(auth))
+        .await
+        .map_err(|status| (status, "Unauthorized access".to_string()))?;
+
+    let followers = sqlx::query_as::<_, User>(
+        "SELECT u.* FROM users u
+         INNER JOIN follows f ON f.follower_id = u.id
+         WHERE f.followed_id = $1",
+    )
+    .bind(target_id)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .into_iter()
+    .map(UserResponse::from)
+    .collect();
+
+    Ok(Json(followers))
+}
+
+pub async fn get_following(
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    Path(target_id): Path<Uuid>,
+) -> Result<Json<Vec<UserResponse>>, (StatusCode, String)> {
+    verify_auth_token(TypedHeader(auth))
+        .await
+        .map_err(|status| (status, "Unauthorized access".to_string()))?;
+
+    let following = sqlx::query_as::<_, User>(
+        "SELECT u.* FROM users u
+         INNER JOIN follows f ON f.followed_id = u.id
+         WHERE f.follower_id = $1",
+    )
+    .bind(target_id)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .into_iter()
+    .map(UserResponse::from)
+    .collect();
+
+    Ok(Json(following))
+}
+
+pub async fn get_my_followers(
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = verify_auth_token(TypedHeader(auth))
+        .await
+        .map_err(|status| (status, "Unauthorized access".to_string()))?;
+
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
+
+    let target_user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    let followers: Vec<UserResponse> = sqlx::query_as::<_, User>(
+        "SELECT u.* FROM users u
+         INNER JOIN follows f ON f.follower_id = u.id
+         WHERE f.followed_id = $1",
+    )
+    .bind(user_id)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .into_iter()
+    .map(UserResponse::from)
+    .collect();
+
+    let count = followers.len();
+
+    Ok(Json(json!({
+        "user": { "id": target_user.id, "username": target_user.username },
+        "followers": followers,
+        "count": count
+    })))
+}
+
+pub async fn get_my_following(
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = verify_auth_token(TypedHeader(auth))
+        .await
+        .map_err(|status| (status, "Unauthorized access".to_string()))?;
+
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
+
+    let target_user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    let following: Vec<UserResponse> = sqlx::query_as::<_, User>(
+        "SELECT u.* FROM users u
+         INNER JOIN follows f ON f.followed_id = u.id
+         WHERE f.follower_id = $1",
+    )
+    .bind(user_id)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .into_iter()
+    .map(UserResponse::from)
+    .collect();
+
+    let count = following.len();
+
+    Ok(Json(json!({
+        "user": { "id": target_user.id, "username": target_user.username },
+        "following": following,
+        "count": count
+    })))
 }

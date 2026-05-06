@@ -233,3 +233,28 @@ pub async fn get_post_by_id(
 
     Ok(Json(post))
 }
+
+pub async fn get_feed(
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    State(pool): State<PgPool>,
+) -> Result<Json<Vec<Post>>, (StatusCode, String)> {
+    let claims = verify_auth_token(TypedHeader(auth))
+        .await
+        .map_err(|status| (status, "Unauthorized".to_string()))?;
+
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
+
+    let posts = sqlx::query_as::<_, Post>(
+        "SELECT p.* FROM posts p
+         INNER JOIN follows f ON f.followed_id = p.user_id
+         WHERE f.follower_id = $1
+         ORDER BY p.created_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(posts))
+}
