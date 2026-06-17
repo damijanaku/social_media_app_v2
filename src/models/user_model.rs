@@ -12,6 +12,7 @@ pub struct User {
     pub password_hash: String,
     pub birthday: Option<chrono::NaiveDate>,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]

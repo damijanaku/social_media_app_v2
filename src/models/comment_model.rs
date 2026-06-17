@@ -10,6 +10,7 @@ pub struct Comment {
     pub user_id: Uuid,
     pub body: String,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -17,6 +17,7 @@ pub struct Post {
     pub user_id: Uuid,
     pub likes_count: i64,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
