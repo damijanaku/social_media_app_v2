@@ -1,6 +1,7 @@
 use crate::models::post_model::{CreatePostInput, Post, UpdatePost};
 use crate::utils::jwt::verify_auth_token;
-use axum::extract::Path;
+use crate::utils::pagination::{self, PaginationParams};
+use axum::extract::{Path, Query};
 use axum::{Json, extract::State, http::StatusCode};
 use axum_extra::TypedHeader;
 use axum_extra::headers::Authorization;
@@ -163,9 +164,10 @@ pub async fn delete_post(
 }
 
 pub async fn get_my_posts(
-    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    Query(pagination): Query<PaginationParams>,
     State(pool): State<PgPool>,
-) -> Result<Json<Vec<Post>>, (StatusCode, String)> {
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let claims = verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
@@ -177,48 +179,86 @@ pub async fn get_my_posts(
         )
     })?;
 
+    let limit = pagination.limit.unwrap_or(10);
+    let page = pagination.page.unwrap_or(1);
+    let offset = (page - 1) * limit;
+
     let posts = sqlx::query_as::<_, Post>(
-        "SELECT * FROM posts WHERE user_id = $1 ORDER BY created_at DESC",
+        "SELECT * FROM posts 
+        WHERE user_id = $1 
+        ORDER BY created_at DESC
+        LIMIT $2 OFFSET $3",
     )
     .bind(user_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(posts))
+    let total_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM posts WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({
+        "posts": posts,
+        "meta": {
+            "total_items": total_count.0,
+            "page": page,
+            "limit": limit
+        }
+    })))
 }
 
 pub async fn get_posts_from_user(
-    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    State(pool): State<PgPool>,
     Path(target_id): Path<Uuid>,
-) -> Result<Json<Vec<Post>>, (StatusCode, String)> {
+    Query(pagination): Query<PaginationParams>,
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
 
+    let limit = pagination.limit.unwrap_or(10);
+    let page = pagination.page.unwrap_or(1);
+    let offset = (page - 1) * limit;
+
     let posts = sqlx::query_as::<_, Post>(
-        "SELECT * FROM posts WHERE user_id = $1 ORDER BY created_at DESC",
+        "SELECT * FROM posts 
+         WHERE user_id = $1 
+         ORDER BY created_at DESC
+         LIMIT $2 OFFSET $3",
     )
     .bind(target_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    if posts.is_empty() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            "No posts found for this user".to_string(),
-        ));
-    }
+    let total_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM posts WHERE user_id = $1")
+        .bind(target_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(posts))
+    Ok(Json(json!({
+        "posts": posts,
+        "meta": {
+            "total_items": total_count.0,
+            "page": page,
+            "limit": limit
+        }
+    })))
 }
 
 pub async fn get_post_by_id(
-    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    State(pool): State<PgPool>,
     Path(target_id): Path<Uuid>,
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
 ) -> Result<Json<Post>, (StatusCode, String)> {
     verify_auth_token(TypedHeader(auth))
         .await
@@ -235,9 +275,10 @@ pub async fn get_post_by_id(
 }
 
 pub async fn get_feed(
-    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    Query(pagination): Query<PaginationParams>,
     State(pool): State<PgPool>,
-) -> Result<Json<Vec<Post>>, (StatusCode, String)> {
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let claims = verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
@@ -245,16 +286,40 @@ pub async fn get_feed(
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
 
+    let limit = pagination.limit.unwrap_or(10);
+    let page = pagination.page.unwrap_or(1);
+    let offset = (page - 1) * limit;
+
     let posts = sqlx::query_as::<_, Post>(
         "SELECT p.* FROM posts p
          INNER JOIN follows f ON f.followed_id = p.user_id
          WHERE f.follower_id = $1
-         ORDER BY p.created_at DESC",
+         ORDER BY p.created_at DESC
+         LIMIT $2 OFFSET $3",
     )
     .bind(user_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(posts))
+    let total_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM posts p
+         INNER JOIN follows f ON f.followed_id = p.user_id
+         WHERE f.follower_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({
+        "posts": posts,
+        "meta": {
+            "total_items": total_count.0,
+            "page": page,
+            "limit": limit
+        }
+    })))
 }

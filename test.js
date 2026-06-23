@@ -4,9 +4,9 @@ import autocannon from 'autocannon';
 
 const BASE_URL = "http://localhost:3000";
 
-let jwttoken = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpZCI6IjIwZDU1ZmI0LThlOWMtNDBlNi05ZmY4LTI4YTkxMDA1ZjBmMyIsInN1YiI6IjIwZDU1ZmI0LThlOWMtNDBlNi05ZmY4LTI4YTkxMDA1ZjBmMyIsImV4cCI6MTc4MTU1MDcxMX0.HyjsrSUcf9BtP6kfljMTsGfHxeUKD20F_l6si6sEElU";
-const TARGET_USER_ID = "c7277ff1-6a65-4418-a3fb-c6ab60b92a3e";
-const TARGET_POST_ID = "9365fd7e-5505-4704-b25a-ecbc26a2eda4";
+const jwttoken = process.env.JWT_TOKEN;
+const TARGET_USER_ID = process.env.TARGET_USER_ID;
+const TARGET_POST_ID = process.env.TARGET_POST_ID;
 const title = "title";
 const body = "text";
 
@@ -78,8 +78,8 @@ function buildPool() {
 
   const instance = autocannon({
     url: BASE_URL,
-    connections: 10,
-    duration: 10,
+    connections: 50,
+    duration: 30,
     requests: pool
   },
     (err, result) => {

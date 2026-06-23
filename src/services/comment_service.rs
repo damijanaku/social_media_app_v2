@@ -1,6 +1,7 @@
 use crate::models::comment_model::{Comment, PostComment};
 use crate::utils::jwt::verify_auth_token;
-use axum::extract::Path;
+use crate::utils::pagination::{self, PaginationParams};
+use axum::extract::{Path, Query};
 use axum::{Json, extract::State, http::StatusCode};
 use axum_extra::TypedHeader;
 use axum_extra::headers::Authorization;
@@ -55,27 +56,45 @@ pub async fn post_comment(
 }
 
 pub async fn get_comments(
-    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    State(pool): State<PgPool>,
     Path(post_id): Path<Uuid>,
+    Query(pagination): Query<PaginationParams>,
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
 
+    let limit = pagination.limit.unwrap_or(10);
+    let page = pagination.page.unwrap_or(1);
+    let offset = (page - 1) * limit;
+
     let comments = sqlx::query_as::<_, Comment>(
-        "SELECT * FROM comments WHERE post_id = $1 ORDER BY created_at DESC",
+        "SELECT * FROM comments 
+         WHERE post_id = $1 
+         ORDER BY created_at DESC 
+         LIMIT $2 OFFSET $3",
     )
     .bind(post_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let count = comments.len();
+    let total_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM comments WHERE post_id = $1")
+        .bind(post_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(json!({
         "comments": comments,
-        "count": count
+        "meta": {
+            "total_items": total_count.0,
+            "page": page,
+            "limit": limit
+        }
     })))
 }
 

@@ -1,8 +1,9 @@
 use crate::models::post_model::Post;
 use crate::models::user_model::{LoginUser, RegisterUser, UpdateUser, User, UserResponse};
 use crate::utils::jwt::{Claims, verify_auth_token};
-use axum::extract::Path;
-use axum::{Json, extract::State, http::StatusCode};
+use crate::utils::pagination::PaginationParams;
+use axum::extract::{Path, Query, State};
+use axum::{Json, http::StatusCode};
 use axum_extra::TypedHeader;
 use axum_extra::headers::Authorization;
 use axum_extra::headers::authorization::Bearer;
@@ -142,6 +143,7 @@ pub async fn login_user(
 }
 
 pub async fn my_profile(
+    Query(pagination): Query<PaginationParams>,
     State(pool): State<PgPool>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
@@ -156,24 +158,45 @@ pub async fn my_profile(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let limit = pagination.limit.unwrap_or(10);
+    let page = pagination.page.unwrap_or(1);
+    let offset = (page - 1) * limit;
+
     let posts = sqlx::query_as::<_, Post>(
-        "SELECT * FROM posts WHERE user_id = $1 ORDER BY created_at DESC",
+        "SELECT * FROM posts 
+         WHERE user_id = $1 
+         ORDER BY created_at DESC
+         LIMIT $2 OFFSET $3",
     )
     .bind(user_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&pool)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let total_posts: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM posts WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     Ok(Json(json!({
         "user": UserResponse::from(user),
         "posts": posts,
+        "meta": {
+            "total_items": total_posts.0,
+            "page": page,
+            "limit": limit
+        }
     })))
 }
 
 pub async fn profile(
+    Path(target_id): Path<Uuid>,
+    Query(pagination): Query<PaginationParams>,
     State(pool): State<PgPool>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    Path(target_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     verify_auth_token(TypedHeader(auth)).await?;
 
@@ -184,17 +207,37 @@ pub async fn profile(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let limit = pagination.limit.unwrap_or(10);
+    let page = pagination.page.unwrap_or(1);
+    let offset = (page - 1) * limit;
+
     let posts = sqlx::query_as::<_, Post>(
-        "SELECT * FROM posts WHERE user_id = $1 ORDER BY created_at DESC",
+        "SELECT * FROM posts 
+         WHERE user_id = $1 
+         ORDER BY created_at DESC
+         LIMIT $2 OFFSET $3",
     )
     .bind(target_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&pool)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let total_posts: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM posts WHERE user_id = $1")
+        .bind(target_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     Ok(Json(json!({
         "user": UserResponse::from(user),
         "posts": posts,
+        "meta": {
+            "total_items": total_posts.0,
+            "page": page,
+            "limit": limit
+        }
     })))
 }
 
@@ -485,56 +528,99 @@ pub async fn unfollow_user(
 }
 
 pub async fn get_followers(
+    Path(target_id): Path<Uuid>,
+    Query(pagination): Query<PaginationParams>,
     State(pool): State<PgPool>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    Path(target_id): Path<Uuid>,
-) -> Result<Json<Vec<UserResponse>>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized access".to_string()))?;
+
+    let limit = pagination.limit.unwrap_or(10);
+    let page = pagination.page.unwrap_or(1);
+    let offset = (page - 1) * limit;
 
     let followers = sqlx::query_as::<_, User>(
         "SELECT u.* FROM users u
          INNER JOIN follows f ON f.follower_id = u.id
-         WHERE f.followed_id = $1",
+         WHERE f.followed_id = $1
+         LIMIT $2 OFFSET $3",
     )
     .bind(target_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .into_iter()
     .map(UserResponse::from)
-    .collect();
+    .collect::<Vec<UserResponse>>();
 
-    Ok(Json(followers))
+    let total_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM follows WHERE followed_id = $1")
+        .bind(target_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({
+        "followers": followers,
+        "meta": {
+            "total_items": total_count.0,
+            "page": page,
+            "limit": limit
+        }
+    })))
 }
 
 pub async fn get_following(
+    Path(target_id): Path<Uuid>,
+    Query(pagination): Query<PaginationParams>,
     State(pool): State<PgPool>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    Path(target_id): Path<Uuid>,
-) -> Result<Json<Vec<UserResponse>>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized access".to_string()))?;
 
+    let limit = pagination.limit.unwrap_or(10);
+    let page = pagination.page.unwrap_or(1);
+    let offset = (page - 1) * limit;
+
     let following = sqlx::query_as::<_, User>(
         "SELECT u.* FROM users u
          INNER JOIN follows f ON f.followed_id = u.id
-         WHERE f.follower_id = $1",
+         WHERE f.follower_id = $1
+         LIMIT $2 OFFSET $3",
     )
     .bind(target_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .into_iter()
     .map(UserResponse::from)
-    .collect();
+    .collect::<Vec<UserResponse>>();
 
-    Ok(Json(following))
+    let total_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM follows WHERE follower_id = $1")
+        .bind(target_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({
+        "following": following,
+        "meta": {
+            "total_items": total_count.0,
+            "page": page,
+            "limit": limit
+        }
+    })))
 }
 
 pub async fn get_my_followers(
+    Query(pagination): Query<PaginationParams>,
     State(pool): State<PgPool>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -551,13 +637,20 @@ pub async fn get_my_followers(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    let limit = pagination.limit.unwrap_or(10);
+    let page = pagination.page.unwrap_or(1);
+    let offset = (page - 1) * limit;
 
     let followers: Vec<UserResponse> = sqlx::query_as::<_, User>(
         "SELECT u.* FROM users u
          INNER JOIN follows f ON f.follower_id = u.id
-         WHERE f.followed_id = $1",
+         WHERE f.followed_id = $1
+         LIMIT $2 OFFSET $3",
     )
     .bind(user_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -565,16 +658,25 @@ pub async fn get_my_followers(
     .map(UserResponse::from)
     .collect();
 
-    let count = followers.len();
+    let total_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM follows WHERE followed_id = $1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(json!({
         "user": { "id": target_user.id, "username": target_user.username },
         "followers": followers,
-        "count": count
+        "meta": {
+            "total_items": total_count.0,
+            "page": page,
+            "limit": limit
+        }
     })))
 }
 
 pub async fn get_my_following(
+    Query(pagination): Query<PaginationParams>,
     State(pool): State<PgPool>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -592,12 +694,19 @@ pub async fn get_my_following(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
+    let limit = pagination.limit.unwrap_or(10);
+    let page = pagination.page.unwrap_or(1);
+    let offset = (page - 1) * limit;
+
     let following: Vec<UserResponse> = sqlx::query_as::<_, User>(
         "SELECT u.* FROM users u
          INNER JOIN follows f ON f.followed_id = u.id
-         WHERE f.follower_id = $1",
+         WHERE f.follower_id = $1
+         LIMIT $2 OFFSET $3",
     )
     .bind(user_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -605,11 +714,19 @@ pub async fn get_my_following(
     .map(UserResponse::from)
     .collect();
 
-    let count = following.len();
+    let total_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM follows WHERE follower_id = $1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(json!({
         "user": { "id": target_user.id, "username": target_user.username },
         "following": following,
-        "count": count
+        "meta": {
+            "total_items": total_count.0,
+            "page": page,
+            "limit": limit
+        }
     })))
 }
