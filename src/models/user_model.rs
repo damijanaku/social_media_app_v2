@@ -39,7 +39,7 @@ pub struct UpdateUser {
     pub birthday: Option<chrono::NaiveDate>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UserResponse {
     pub id: Uuid,
     pub username: String,
