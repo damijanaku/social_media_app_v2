@@ -18,7 +18,7 @@ pub async fn like_post(
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
 
-    let user_id = Uuid::parse_str(&claims.id).map_err(|_| {
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
             "Invalid user ID format".to_string(),
@@ -75,7 +75,7 @@ pub async fn unlike_post(
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
 
-    let user_id = Uuid::parse_str(&claims.id).map_err(|_| {
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
             "Invalid user ID format".to_string(),
@@ -138,4 +138,43 @@ pub async fn get_likes(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(json!({ "post_id": post_id, "likes": count })))
+}
+
+pub async fn check_user_like(
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    State(pool): State<PgPool>,
+    Path(post_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = verify_auth_token(TypedHeader(auth))
+        .await
+        .map_err(|status| (status, "Unauthorized".to_string()))?;
+
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid user ID format".to_string(),
+        )
+    })?;
+
+    let post_exists =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM posts WHERE id = $1)")
+            .bind(post_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if !post_exists {
+        return Err((StatusCode::NOT_FOUND, "Post not found".to_string()));
+    }
+
+    let liked = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM likes WHERE user_id = $1 AND post_id = $2)",
+    )
+    .bind(user_id)
+    .bind(post_id)
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "post_id": post_id, "liked": liked })))
 }
