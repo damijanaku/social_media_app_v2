@@ -27,7 +27,7 @@ pub async fn create_post(
         .await
         .map_err(|status| (status, "Unauthorized access".to_string()))?;
 
-    let user_id = Uuid::parse_str(&claims.id).map_err(|_| {
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
             "Invalid user ID format".to_string(),
@@ -61,7 +61,7 @@ pub async fn update_post(
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
 
-    let user_id = Uuid::parse_str(&claims.id)
+    let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
 
     if payload.title.is_none() && payload.body.is_none() {

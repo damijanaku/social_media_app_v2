@@ -730,3 +730,31 @@ pub async fn get_my_following(
         }
     })))
 }
+
+pub async fn check_follow_status(
+    State(pool): State<PgPool>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    Path(target_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = verify_auth_token(TypedHeader(auth))
+        .await
+        .map_err(|status| (status, "Unauthorized access".to_string()))?;
+
+    let follower_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
+
+    if follower_id == target_id {
+        return Ok(Json(json!({ "isFollowing": false })));
+    }
+
+    let is_following = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM follows WHERE follower_id = $1 AND followed_id = $2)",
+    )
+    .bind(follower_id)
+    .bind(target_id)
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "isFollowing": is_following })))
+}
