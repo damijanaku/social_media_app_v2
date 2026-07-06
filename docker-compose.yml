@@ -12,6 +12,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "3.0"
+          memory: 512M
     restart: unless-stopped
 
   app:
@@ -25,7 +30,7 @@ services:
       DATABASE_URL: postgresql://postgres:${DB_PASSWORD}@db:5432/${DB_NAME}?schema=public
       PORT: 3000
       APP_ENV: production
-      POOL_CONNECTIONS: 12
+      POOL_CONNECTIONS: 1
     ports:
       - "3000:3000"
     healthcheck:
@@ -36,7 +41,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1"
+          cpus: "2.0"
           memory: 512M
     restart: on-failure
 
