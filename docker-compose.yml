@@ -19,6 +19,30 @@ services:
           memory: 512M
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    command:
+      [
+        "redis-server",
+        "--maxmemory",
+        "256mb",
+        "--maxmemory-policy",
+        "allkeys-lru",
+      ]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 300M
+    restart: unless-stopped
+
   app:
     build:
       context: .
@@ -26,25 +50,30 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql://postgres:${DB_PASSWORD}@db:5432/${DB_NAME}?schema=public
+      REDIS_URL: redis://redis:6379
       PORT: 3000
       APP_ENV: production
-      POOL_CONNECTIONS: 1
+      POOL_CONNECTIONS: 24
     ports:
       - "3000:3000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
       interval: 10s
       timeout: 3s
-      retries: 3
+      retries: 24
     deploy:
       resources:
         limits:
-          cpus: "2.0"
+          cpus: "1.5"
           memory: 512M
     restart: on-failure
 
 volumes:
   postgres_data:
     name: social_media_app_v2_pg_data
+  redis_data:
+    name: social_media_app_v2_redis_data

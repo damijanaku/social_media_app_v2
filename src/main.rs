@@ -3,11 +3,21 @@ mod routemount;
 mod services;
 mod utils;
 
+use deadpool_redis::{Config as RedisConfig, Runtime};
+use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::error::Error;
+use utils::cache::CacheService;
 
-#[tokio::main]
+#[derive(Clone)]
+pub struct AppState {
+    pub db: PgPool,
+    pub redis: deadpool_redis::Pool,
+    pub cache: CacheService,
+}
+
+#[tokio::main(worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn Error>> {
     dotenvy::dotenv().ok();
 
@@ -35,7 +45,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Successfully connected to PostgreSQL!");
 
-    let app = crate::routemount::route::create_router(pool);
+    let redis_url = env::var("REDIS_URL").expect("Redis url must be set in .env file");
+    let redis_cfg = RedisConfig::from_url(redis_url);
+    let redis_pool = redis_cfg
+        .create_pool(Some(Runtime::Tokio1))
+        .expect("failed to create redis pool");
+
+    {
+        let mut conn = redis_pool
+            .get()
+            .await
+            .expect("Failed to get redis connection");
+        let _: () = deadpool_redis::redis::cmd("PING")
+            .query_async(&mut conn)
+            .await?;
+    }
+    println!("Successfully connected to Redis");
+
+    let cache = CacheService::new(redis_pool.clone());
+
+    let state = AppState {
+        db: pool,
+        redis: redis_pool,
+        cache,
+    };
+
+    let app = crate::routemount::route::create_router(state);
 
     let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     let addr = format!("0.0.0.0:{}", port);
