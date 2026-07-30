@@ -5,6 +5,7 @@ use crate::utils::cache;
 use crate::utils::jwt::{Claims, verify_auth_token};
 use crate::utils::pagination::PaginationParams;
 use axum::extract::{Path, Query, State};
+use axum::response::IntoResponse;
 use axum::{Json, http::StatusCode};
 use axum_extra::TypedHeader;
 use axum_extra::headers::Authorization;
@@ -13,7 +14,20 @@ use bcrypt::{hash, verify};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde_json::{Value, json};
+use std::time::Instant;
 use uuid::Uuid;
+
+pub async fn ping_handler() -> impl IntoResponse {
+    let start = Instant::now();
+
+    let response = Json(json!({
+        "status": "ok",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "service": "rust-app"
+    }));
+
+    (StatusCode::OK, response)
+}
 
 pub async fn register_user(
     State(state): State<AppState>,

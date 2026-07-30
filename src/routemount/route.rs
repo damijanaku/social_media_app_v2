@@ -7,8 +7,8 @@ use crate::services::post_service::{
 };
 use crate::services::user_service::{
     check_follow_status, delete_user, follow_user, get_followers, get_following, get_my_followers,
-    get_my_following, get_user, get_user_by_username, login_user, my_profile, profile,
-    register_user, unfollow_user, update_user,
+    get_my_following, get_user, get_user_by_username, login_user, my_profile, ping_handler,
+    profile, register_user, unfollow_user, update_user,
 };
 use crate::utils::jwt::refresh_token;
 use axum::{Router, routing::delete, routing::get, routing::post, routing::put};
@@ -17,6 +17,7 @@ use sqlx::PgPool;
 pub fn create_router(state: AppState) -> Router<()> {
     Router::new()
         .route("/api/v1/auth/refresh", post(refresh_token))
+        .route("/ping", get(ping_handler))
         .route("/api/v1/users/login", post(login_user))
         .route("/api/v1/users/register", post(register_user))
         .route("/api/v1/users/followers/:target_id", get(get_followers))

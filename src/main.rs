@@ -8,6 +8,7 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::error::Error;
+use std::fs;
 use utils::cache::CacheService;
 
 #[derive(Clone)]
@@ -17,7 +18,7 @@ pub struct AppState {
     pub cache: CacheService,
 }
 
-#[tokio::main(worker_threads = 2)]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     dotenvy::dotenv().ok();
 
@@ -26,11 +27,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Starting server in {} mode", app_env);
 
-    let database_url =
-        env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env or environment");
+    let db_host = env::var("DB_HOST").unwrap_or_else(|_| "db".to_string());
+    let db_port = env::var("DB_PORT").unwrap_or_else(|_| "5432".to_string());
+    let db_user = env::var("POSTGRES_USER").unwrap_or_else(|_| "postgres".to_string());
+
+    let db_pass = fs::read_to_string("/run/secrets/db_password")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "rootroot123".to_string());
+
+    let db_name = fs::read_to_string("/run/secrets/db_name")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "social_media_app_v2".to_string());
+
+    let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
+        format!(
+            "postgresql://{}:{}@{}:{}/{}?sslmode=prefer&schema=public",
+            db_user, db_pass, db_host, db_port, db_name
+        )
+    });
 
     let pool_env = env::var("POOL_CONNECTIONS").unwrap_or_else(|_| "12".to_string());
-
     let max_connections = pool_env
         .parse::<u32>()
         .expect("POOL_CONNECTIONS must be a valid unsigned integer");
@@ -77,7 +93,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    println!(" Listening on http://{}", addr);
+    println!("Listening on http://{}", addr);
     if !is_production {
         println!("Health check: http://localhost:{}/health", port);
     }
