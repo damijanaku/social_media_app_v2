@@ -1,3 +1,4 @@
+use crate::AppState;
 use crate::models::post_model::{CreatePostInput, Post, UpdatePost};
 use crate::utils::jwt::verify_auth_token;
 use crate::utils::pagination::{self, PaginationParams};
@@ -6,16 +7,17 @@ use axum::{Json, extract::State, http::StatusCode};
 use axum_extra::TypedHeader;
 use axum_extra::headers::Authorization;
 use axum_extra::headers::authorization::Bearer;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 pub async fn create_post(
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     Json(body): Json<CreatePostInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let pool = &state.db;
     if body.title.is_empty() || body.body.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -44,19 +46,30 @@ pub async fn create_post(
     .bind(&body.body)
     .bind(user_id)
     .bind(Utc::now())
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let _ = state
+        .cache
+        .invalidate_pattern(&format!("user:posts:{}:*", user_id))
+        .await;
+
+    let _ = state
+        .cache
+        .invalidate_pattern(&format!("feed:{}:*", user_id))
+        .await;
 
     Ok(Json(json!({ "post": post })))
 }
 
 pub async fn update_post(
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     Path(target_id): Path<Uuid>,
     Json(payload): Json<UpdatePost>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let pool = &state.db;
     let claims = verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
@@ -73,7 +86,7 @@ pub async fn update_post(
 
     let post = sqlx::query_as::<_, Post>("SELECT * FROM posts WHERE id = $1")
         .bind(target_id)
-        .fetch_optional(&pool)
+        .fetch_optional(pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Post not found".to_string()))?;
@@ -95,25 +108,36 @@ pub async fn update_post(
     .bind(payload.title.as_deref())
     .bind(payload.body.as_deref())
     .bind(target_id)
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let cache_key = crate::utils::cache::keys::post(target_id);
+    let _ = state.cache.delete(&cache_key).await;
+
+    let _ = state
+        .cache
+        .invalidate_pattern(&format!("user:posts:{}:*", updated_post.user_id))
+        .await;
+
+    let _ = state.cache.invalidate_pattern(&format!("feed:*:*")).await;
 
     Ok(Json(json!({ "post": updated_post })))
 }
 
 pub async fn delete_post(
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     Path(target_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let pool = &state.db;
     let claims = verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
 
     let post = sqlx::query_as::<_, Post>("SELECT * FROM posts WHERE id = $1")
         .bind(target_id)
-        .fetch_optional(&pool)
+        .fetch_optional(pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Post not found".to_string()))?;
@@ -154,6 +178,15 @@ pub async fn delete_post(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let cache_key = crate::utils::cache::keys::post(target_id);
+    let _ = state.cache.delete(&cache_key).await;
+
+    let _ = state
+        .cache
+        .invalidate_pattern(&format!("user:posts:{}:*", post.user_id))
+        .await;
+    let _ = state.cache.invalidate_pattern(&format!("feed:*:*")).await;
+
     Ok(Json(json!({
         "message": "Post deleted successfully",
         "details": {
@@ -165,9 +198,10 @@ pub async fn delete_post(
 
 pub async fn get_my_posts(
     Query(pagination): Query<PaginationParams>,
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let pool = &state.db;
     let claims = verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
@@ -181,6 +215,17 @@ pub async fn get_my_posts(
 
     let limit = pagination.limit.unwrap_or(10);
     let page = pagination.page.unwrap_or(1);
+
+    let cache_key = crate::utils::cache::keys::user_posts(user_id, page as u32, limit as u32);
+    if let Some(cached_data) = state
+        .cache
+        .get::<serde_json::Value>(&cache_key)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        return Ok(Json(cached_data));
+    }
+
     let offset = (page - 1) * limit;
 
     let posts = sqlx::query_as::<_, Post>(
@@ -192,38 +237,64 @@ pub async fn get_my_posts(
     .bind(user_id)
     .bind(limit)
     .bind(offset)
-    .fetch_all(&pool)
+    .fetch_all(pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let total_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM posts WHERE user_id = $1")
+    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM posts WHERE user_id = $1")
         .bind(user_id)
-        .fetch_one(&pool)
+        .fetch_one(pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(json!({
+    let response = json!({
         "posts": posts,
         "meta": {
-            "total_items": total_count.0,
+            "total_items": total_count,
             "page": page,
             "limit": limit
         }
-    })))
+    });
+
+    if let Err(e) = state
+        .cache
+        .set(
+            &cache_key,
+            &response,
+            Some(Duration::seconds(60).to_std().unwrap()),
+        )
+        .await
+    {
+        eprintln!("Failed to cache user posts: {}", e);
+    }
+
+    Ok(Json(response))
 }
 
 pub async fn get_posts_from_user(
     Path(target_id): Path<Uuid>,
     Query(pagination): Query<PaginationParams>,
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let pool = &state.db;
     verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
 
     let limit = pagination.limit.unwrap_or(10);
     let page = pagination.page.unwrap_or(1);
+
+    let cache_key = crate::utils::cache::keys::user_posts(target_id, page as u32, limit as u32);
+    if let Some(cached_data) = state
+        .cache
+        .get::<serde_json::Value>(&cache_key)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        return Ok(Json(cached_data));
+    }
+
     let offset = (page - 1) * limit;
 
     let posts = sqlx::query_as::<_, Post>(
@@ -235,50 +306,88 @@ pub async fn get_posts_from_user(
     .bind(target_id)
     .bind(limit)
     .bind(offset)
-    .fetch_all(&pool)
+    .fetch_all(pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let total_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM posts WHERE user_id = $1")
+    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM posts WHERE user_id = $1")
         .bind(target_id)
-        .fetch_one(&pool)
+        .fetch_one(pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(json!({
+    let response = json!({
         "posts": posts,
         "meta": {
-            "total_items": total_count.0,
+            "total_items": total_count,
             "page": page,
             "limit": limit
         }
-    })))
+    });
+
+    if let Err(e) = state
+        .cache
+        .set(
+            &cache_key,
+            &response,
+            Some(Duration::seconds(120).to_std().unwrap()),
+        )
+        .await
+    {
+        eprintln!("Failed to cache user posts: {}", e);
+    }
+
+    Ok(Json(response))
 }
 
 pub async fn get_post_by_id(
     Path(target_id): Path<Uuid>,
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
 ) -> Result<Json<Post>, (StatusCode, String)> {
+    let pool = &state.db;
     verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
 
+    let cache_key = crate::utils::cache::keys::post(target_id);
+    if let Some(cached_post) = state
+        .cache
+        .get::<Post>(&cache_key)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        return Ok(Json(cached_post));
+    }
+
     let post = sqlx::query_as::<_, Post>("SELECT * FROM posts WHERE id = $1")
         .bind(target_id)
-        .fetch_optional(&pool)
+        .fetch_optional(pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Post not found".to_string()))?;
+
+    if let Err(e) = state
+        .cache
+        .set(
+            &cache_key,
+            &post,
+            Some(Duration::seconds(300).to_std().unwrap()),
+        )
+        .await
+    {
+        eprintln!("Failed to cache post: {}", e);
+    }
 
     Ok(Json(post))
 }
 
 pub async fn get_feed(
     Query(pagination): Query<PaginationParams>,
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let pool = &state.db;
     let claims = verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
@@ -288,6 +397,17 @@ pub async fn get_feed(
 
     let limit = pagination.limit.unwrap_or(10);
     let page = pagination.page.unwrap_or(1);
+
+    let cache_key = crate::utils::cache::keys::feed(user_id, page as u32, limit as u32);
+    if let Some(cached_data) = state
+        .cache
+        .get::<serde_json::Value>(&cache_key)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        return Ok(Json(cached_data));
+    }
+
     let offset = (page - 1) * limit;
 
     let posts = sqlx::query_as::<_, Post>(
@@ -300,26 +420,40 @@ pub async fn get_feed(
     .bind(user_id)
     .bind(limit)
     .bind(offset)
-    .fetch_all(&pool)
+    .fetch_all(pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let total_count: (i64,) = sqlx::query_as(
+    let total_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM posts p
          INNER JOIN follows f ON f.followed_id = p.user_id
          WHERE f.follower_id = $1",
     )
     .bind(user_id)
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(json!({
+    let response = json!({
         "posts": posts,
         "meta": {
-            "total_items": total_count.0,
+            "total_items": total_count,
             "page": page,
             "limit": limit
         }
-    })))
+    });
+
+    if let Err(e) = state
+        .cache
+        .set(
+            &cache_key,
+            &response,
+            Some(Duration::seconds(30).to_std().unwrap()),
+        )
+        .await
+    {
+        eprintln!("Failed to cache feed: {}", e);
+    }
+
+    Ok(Json(response))
 }

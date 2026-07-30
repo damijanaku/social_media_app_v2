@@ -102,7 +102,7 @@ function buildPool() {
   const instance = autocannon({
     url: BASE_URL,
     connections: 50,
-    duration: 30,
+    duration: 60,
     requests: pool
   },
     (err, result) => {
