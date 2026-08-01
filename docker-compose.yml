@@ -3,7 +3,20 @@ version: "3.9"
 services:
   db:
     image: postgres:16-alpine
-    command: postgres -c listen_addresses='*'
+    command:
+      - postgres
+      - -c
+      - listen_addresses=*
+      - -c
+      - shared_buffers=4GB
+      - -c
+      - effective_cache_size=12GB
+      - -c
+      - work_mem=32MB
+      - -c
+      - max_connections=200
+      - -c
+      - random_page_cost=1.1
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD_FILE: /run/secrets/db_password
@@ -26,8 +39,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "3.0"
-          memory: 512M
+          cpus: "5.0"
+          memory: 8G
     networks:
       - backend
     restart: unless-stopped

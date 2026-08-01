@@ -9,6 +9,7 @@ use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::error::Error;
 use std::fs;
+use std::time::Duration;
 use utils::cache::CacheService;
 
 #[derive(Clone)]
@@ -41,7 +42,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
         format!(
-            "postgresql://{}:{}@{}:{}/{}?sslmode=prefer&schema=public",
+            "postgresql://{}:{}@{}:{}/{}?sslmode=disable",
             db_user, db_pass, db_host, db_port, db_name
         )
     });
@@ -53,6 +54,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)
+        .min_connections(max_connections / 2)
+        .acquire_timeout(Duration::from_secs(5))
+        .idle_timeout(Duration::from_secs(600))
+        .max_lifetime(Duration::from_secs(1800))
+        .test_before_acquire(false)
         .connect(&database_url)
         .await
         .expect("Failed to connect to the database pool");
