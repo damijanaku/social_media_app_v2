@@ -84,7 +84,10 @@ pub async fn register_user(
         ));
     }
 
-    let hashed = hash(&payload.password, 12)
+    let password = payload.password.clone();
+    let hashed = tokio::task::spawn_blocking(move || hash(&password, 12))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let user = sqlx::query_as::<_, User>(
@@ -129,7 +132,11 @@ pub async fn login_user(
             "Wrong username or password".to_string(),
         ))?;
 
-    let valid = verify(&payload.password, &user.password_hash)
+    let password = payload.password.clone();
+    let password_hash = user.password_hash.clone();
+    let valid = tokio::task::spawn_blocking(move || verify(&password, &password_hash))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if !valid {
@@ -462,7 +469,12 @@ pub async fn update_user(
     }
 
     let hashed_password = if let Some(ref pw) = payload.password {
-        Some(hash(pw, 12).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?)
+        let password = pw.clone();
+        let hashed = tokio::task::spawn_blocking(move || hash(&password, 12))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        Some(hashed)
     } else {
         None
     };
