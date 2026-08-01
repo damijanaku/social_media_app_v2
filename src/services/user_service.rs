@@ -375,6 +375,78 @@ pub async fn delete_user(
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
 
+    let user_pattern = format!("user:{}", user_id);
+    let user_profile_pattern = format!("user:profile:{}:*", user_id);
+    let user_posts_pattern = format!("user:posts:{}:*", user_id);
+    let followers_pattern = format!("followers:{}:*", user_id);
+    let following_pattern = format!("following:{}:*", user_id);
+    let feed_pattern = format!("feed:{}:*", user_id);
+    let follower_count_key = crate::utils::cache::keys::follower_count(user_id);
+    let following_count_key = crate::utils::cache::keys::following_count(user_id);
+
+    let (
+        user_result,
+        user_profile_result,
+        user_posts_result,
+        followers_result,
+        following_result,
+        feed_result,
+        follower_count_result,
+        following_count_result,
+    ) = tokio::join!(
+        state.cache.invalidate_pattern(&user_pattern),
+        state.cache.invalidate_pattern(&user_profile_pattern),
+        state.cache.invalidate_pattern(&user_posts_pattern),
+        state.cache.invalidate_pattern(&followers_pattern),
+        state.cache.invalidate_pattern(&following_pattern),
+        state.cache.invalidate_pattern(&feed_pattern),
+        state.cache.delete(&follower_count_key),
+        state.cache.delete(&following_count_key),
+    );
+
+    if let Err(e) = user_result {
+        eprintln!("Failed to invalidate user cache for {}: {}", user_id, e);
+    }
+    if let Err(e) = user_profile_result {
+        eprintln!(
+            "Failed to invalidate user profile cache for {}: {}",
+            user_id, e
+        );
+    }
+    if let Err(e) = user_posts_result {
+        eprintln!(
+            "Failed to invalidate user posts cache for {}: {}",
+            user_id, e
+        );
+    }
+    if let Err(e) = followers_result {
+        eprintln!(
+            "Failed to invalidate followers cache for {}: {}",
+            user_id, e
+        );
+    }
+    if let Err(e) = following_result {
+        eprintln!(
+            "Failed to invalidate following cache for {}: {}",
+            user_id, e
+        );
+    }
+    if let Err(e) = feed_result {
+        eprintln!("Failed to invalidate feed cache for {}: {}", user_id, e);
+    }
+    if let Err(e) = follower_count_result {
+        eprintln!(
+            "Failed to delete follower count cache for {}: {}",
+            user_id, e
+        );
+    }
+    if let Err(e) = following_count_result {
+        eprintln!(
+            "Failed to delete following count cache for {}: {}",
+            user_id, e
+        );
+    }
+
     let mut tx = pool
         .begin()
         .await
@@ -488,6 +560,48 @@ pub async fn follow_user(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let followers_pattern = format!("followers:{}:*", target_id);
+    let following_pattern = format!("following:{}:*", follower_id);
+    let feed_pattern = format!("feed:{}:*", follower_id);
+    let follower_count_key = crate::utils::cache::keys::follower_count(target_id);
+    let following_count_key = crate::utils::cache::keys::following_count(follower_id);
+
+    let (
+        followers_result,
+        following_result,
+        follower_count_result,
+        following_count_result,
+        feed_result,
+    ) = tokio::join!(
+        state.cache.invalidate_pattern(&followers_pattern),
+        state.cache.invalidate_pattern(&following_pattern),
+        state.cache.delete(&follower_count_key),
+        state.cache.delete(&following_count_key),
+        state.cache.invalidate_pattern(&feed_pattern),
+    );
+
+    if let Err(e) = followers_result {
+        eprintln!(
+            "Failed to invalidate followers cache for {}: {}",
+            target_id, e
+        );
+    }
+    if let Err(e) = following_result {
+        eprintln!(
+            "Failed to invalidate following cache for {}: {}",
+            follower_id, e
+        );
+    }
+    if let Err(e) = follower_count_result {
+        eprintln!("Failed to delete follower count cache: {}", e);
+    }
+    if let Err(e) = following_count_result {
+        eprintln!("Failed to delete following count cache: {}", e);
+    }
+    if let Err(e) = feed_result {
+        eprintln!("Failed to invalidate feed cache for {}: {}", follower_id, e);
+    }
+
     Ok(Json(json!({ "message": "User followed successfully" })))
 }
 
@@ -522,6 +636,48 @@ pub async fn unfollow_user(
             StatusCode::NOT_FOUND,
             "You are not following this user".to_string(),
         ));
+    }
+
+    let followers_pattern = format!("followers:{}:*", target_id);
+    let following_pattern = format!("following:{}:*", follower_id);
+    let feed_pattern = format!("feed:{}:*", follower_id);
+    let follower_count_key = crate::utils::cache::keys::follower_count(target_id);
+    let following_count_key = crate::utils::cache::keys::following_count(follower_id);
+
+    let (
+        followers_result,
+        following_result,
+        follower_count_result,
+        following_count_result,
+        feed_result,
+    ) = tokio::join!(
+        state.cache.invalidate_pattern(&followers_pattern),
+        state.cache.invalidate_pattern(&following_pattern),
+        state.cache.delete(&follower_count_key),
+        state.cache.delete(&following_count_key),
+        state.cache.invalidate_pattern(&feed_pattern),
+    );
+
+    if let Err(e) = followers_result {
+        eprintln!(
+            "Failed to invalidate followers cache for {}: {}",
+            target_id, e
+        );
+    }
+    if let Err(e) = following_result {
+        eprintln!(
+            "Failed to invalidate following cache for {}: {}",
+            follower_id, e
+        );
+    }
+    if let Err(e) = follower_count_result {
+        eprintln!("Failed to delete follower count cache: {}", e);
+    }
+    if let Err(e) = following_count_result {
+        eprintln!("Failed to delete following count cache: {}", e);
+    }
+    if let Err(e) = feed_result {
+        eprintln!("Failed to invalidate feed cache for {}: {}", follower_id, e);
     }
 
     Ok(Json(json!({ "message": "User unfollowed successfully" })))

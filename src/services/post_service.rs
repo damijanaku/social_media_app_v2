@@ -48,6 +48,21 @@ pub async fn create_post(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let user_posts_pattern = format!("user:posts:{}:*", user_id);
+    let feed_pattern = format!("feed:{}:*", user_id);
+
+    let (result1, result2) = tokio::join!(
+        state.cache.invalidate_pattern(&user_posts_pattern),
+        state.cache.invalidate_pattern(&feed_pattern),
+    );
+
+    if let Err(e) = result1 {
+        eprintln!("Failed to invalidate user posts cache: {}", e);
+    }
+    if let Err(e) = result2 {
+        eprintln!("Failed to invalidate feed cache: {}", e);
+    }
+
     Ok(Json(json!({ "post": post })))
 }
 
@@ -98,6 +113,26 @@ pub async fn update_post(
     .fetch_one(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let cache_key = crate::utils::cache::keys::post(target_id);
+    let user_posts_pattern = format!("user:posts:{}:*", user_id);
+    let feed_pattern = format!("feed:{}:*", user_id);
+
+    let (del_res, inval_user_res, inval_feed_res) = tokio::join!(
+        state.cache.delete(&cache_key),
+        state.cache.invalidate_pattern(&user_posts_pattern),
+        state.cache.invalidate_pattern(&feed_pattern),
+    );
+
+    if let Err(e) = del_res {
+        eprintln!("Failed to delete post cache: {}", e);
+    }
+    if let Err(e) = inval_user_res {
+        eprintln!("Failed to invalidate user posts cache: {}", e);
+    }
+    if let Err(e) = inval_feed_res {
+        eprintln!("Failed to invalidate feed cache: {}", e);
+    }
 
     Ok(Json(json!({ "post": updated_post })))
 }
@@ -321,5 +356,19 @@ pub async fn get_feed(
             "page": page,
             "limit": limit
         }
-    })))
+    });
+
+    if let Err(e) = state
+        .cache
+        .set(
+            &cache_key,
+            &response,
+            Some(Duration::seconds(120).to_std().unwrap()),
+        )
+        .await
+    {
+        eprintln!("Failed to cache feed: {}", e);
+    }
+
+    Ok(Json(response))
 }

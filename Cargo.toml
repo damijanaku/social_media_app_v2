@@ -17,6 +17,9 @@ sqlx = { version = "0.7.4", features = ["runtime-tokio-native-tls", "postgres", 
 uuid = { version = "1.6", features = ["v4", "serde"] }
 reqwest = "0.11"
 dotenvy = "0.15.7"
+deadpool-redis = { version = "0.18", features = ["rt_tokio_1"] }
+blake3 = "1.5"
+
 
 [dev-dependencies]
 sqlx-cli = "0.7"
