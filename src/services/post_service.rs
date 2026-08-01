@@ -228,10 +228,16 @@ pub async fn get_my_posts(
         )
     })?;
 
-    let limit = pagination.limit.unwrap_or(10);
-    let page = pagination.page.unwrap_or(1);
+    let (page, limit) = pagination.resolve();
+    let fetch_limit = pagination.fetch_limit();
+    let include_count = pagination.include_count();
 
-    let cache_key = crate::utils::cache::keys::user_posts(user_id, page as u32, limit as u32);
+    let cache_key = if include_count {
+        format!("user:posts:{}:p{}:l{}:with_count", user_id, page, limit)
+    } else {
+        format!("user:posts:{}:p{}:l{}", user_id, page, limit)
+    };
+
     if let Some(cached_data) = state
         .cache
         .get::<serde_json::Value>(&cache_key)
@@ -241,7 +247,7 @@ pub async fn get_my_posts(
         return Ok(Json(cached_data));
     }
 
-    let offset = (page - 1) * limit;
+    let offset = pagination.offset();
 
     let posts = sqlx::query_as::<_, Post>(
         "SELECT * FROM posts 
@@ -250,26 +256,41 @@ pub async fn get_my_posts(
         LIMIT $2 OFFSET $3",
     )
     .bind(user_id)
-    .bind(limit)
+    .bind(fetch_limit)
     .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM posts WHERE user_id = $1")
-        .bind(user_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let has_more = posts.len() > limit as usize;
+    let posts = posts.into_iter().take(limit as usize).collect::<Vec<_>>();
 
-    let response = json!({
-        "posts": posts,
-        "meta": {
-            "total_items": total_count,
-            "page": page,
-            "limit": limit
-        }
-    });
+    let response = if include_count {
+        let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM posts WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        json!({
+            "posts": posts,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more,
+                "total_items": total_count
+            }
+        })
+    } else {
+        json!({
+            "posts": posts,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more
+            }
+        })
+    };
 
     if let Err(e) = state
         .cache
@@ -297,10 +318,16 @@ pub async fn get_posts_from_user(
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
 
-    let limit = pagination.limit.unwrap_or(10);
-    let page = pagination.page.unwrap_or(1);
+    let (page, limit) = pagination.resolve();
+    let fetch_limit = pagination.fetch_limit();
+    let include_count = pagination.include_count();
 
-    let cache_key = crate::utils::cache::keys::user_posts(target_id, page as u32, limit as u32);
+    let cache_key = if include_count {
+        format!("user:posts:{}:p{}:l{}:with_count", target_id, page, limit)
+    } else {
+        format!("user:posts:{}:p{}:l{}", target_id, page, limit)
+    };
+
     if let Some(cached_data) = state
         .cache
         .get::<serde_json::Value>(&cache_key)
@@ -310,7 +337,7 @@ pub async fn get_posts_from_user(
         return Ok(Json(cached_data));
     }
 
-    let offset = (page - 1) * limit;
+    let offset = pagination.offset();
 
     let posts = sqlx::query_as::<_, Post>(
         "SELECT * FROM posts 
@@ -319,26 +346,41 @@ pub async fn get_posts_from_user(
          LIMIT $2 OFFSET $3",
     )
     .bind(target_id)
-    .bind(limit)
+    .bind(fetch_limit)
     .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM posts WHERE user_id = $1")
-        .bind(target_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let has_more = posts.len() > limit as usize;
+    let posts = posts.into_iter().take(limit as usize).collect::<Vec<_>>();
 
-    let response = json!({
-        "posts": posts,
-        "meta": {
-            "total_items": total_count,
-            "page": page,
-            "limit": limit
-        }
-    });
+    let response = if include_count {
+        let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM posts WHERE user_id = $1")
+            .bind(target_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        json!({
+            "posts": posts,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more,
+                "total_items": total_count
+            }
+        })
+    } else {
+        json!({
+            "posts": posts,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more
+            }
+        })
+    };
 
     if let Err(e) = state
         .cache
@@ -354,7 +396,6 @@ pub async fn get_posts_from_user(
 
     Ok(Json(response))
 }
-
 pub async fn get_post_by_id(
     Path(target_id): Path<Uuid>,
     State(state): State<AppState>,
@@ -410,10 +451,16 @@ pub async fn get_feed(
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
 
-    let limit = pagination.limit.unwrap_or(10);
-    let page = pagination.page.unwrap_or(1);
+    let (page, limit) = pagination.resolve();
+    let fetch_limit = pagination.fetch_limit();
+    let include_count = pagination.include_count();
 
-    let cache_key = crate::utils::cache::keys::feed(user_id, page as u32, limit as u32);
+    let cache_key = if include_count {
+        format!("feed:{}:p{}:l{}:with_count", user_id, page, limit)
+    } else {
+        format!("feed:{}:p{}:l{}", user_id, page, limit)
+    };
+
     if let Some(cached_data) = state
         .cache
         .get::<serde_json::Value>(&cache_key)
@@ -423,7 +470,7 @@ pub async fn get_feed(
         return Ok(Json(cached_data));
     }
 
-    let offset = (page - 1) * limit;
+    let offset = pagination.offset();
 
     let posts = sqlx::query_as::<_, Post>(
         "SELECT p.* FROM posts p
@@ -433,30 +480,45 @@ pub async fn get_feed(
          LIMIT $2 OFFSET $3",
     )
     .bind(user_id)
-    .bind(limit)
+    .bind(fetch_limit)
     .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let total_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM posts p
-         INNER JOIN follows f ON f.followed_id = p.user_id
-         WHERE f.follower_id = $1",
-    )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let has_more = posts.len() > limit as usize;
+    let posts = posts.into_iter().take(limit as usize).collect::<Vec<_>>();
 
-    let response = json!({
-        "posts": posts,
-        "meta": {
-            "total_items": total_count,
-            "page": page,
-            "limit": limit
-        }
-    });
+    let response = if include_count {
+        let total_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM posts p
+             INNER JOIN follows f ON f.followed_id = p.user_id
+             WHERE f.follower_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        json!({
+            "posts": posts,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more,
+                "total_items": total_count
+            }
+        })
+    } else {
+        json!({
+            "posts": posts,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more
+            }
+        })
+    };
 
     if let Err(e) = state
         .cache

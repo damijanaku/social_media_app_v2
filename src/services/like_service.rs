@@ -239,17 +239,6 @@ pub async fn check_user_like(
         return Ok(Json(json!({ "post_id": post_id, "liked": cached_liked })));
     }
 
-    let post_exists =
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM posts WHERE id = $1)")
-            .bind(post_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    if !post_exists {
-        return Err((StatusCode::NOT_FOUND, "Post not found".to_string()));
-    }
-
     let liked = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM likes WHERE user_id = $1 AND post_id = $2)",
     )
