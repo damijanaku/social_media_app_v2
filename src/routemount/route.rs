@@ -1,3 +1,4 @@
+use crate::AppState;
 use crate::services::comment_service::{delete_comment, get_comments, post_comment};
 use crate::services::like_service::{check_user_like, get_likes, like_post, unlike_post};
 use crate::services::post_service::{
@@ -6,16 +7,17 @@ use crate::services::post_service::{
 };
 use crate::services::user_service::{
     check_follow_status, delete_user, follow_user, get_followers, get_following, get_my_followers,
-    get_my_following, get_user, get_user_by_username, login_user, my_profile, profile,
-    register_user, unfollow_user, update_user,
+    get_my_following, get_user, get_user_by_username, login_user, my_profile, ping_handler,
+    profile, register_user, unfollow_user, update_user,
 };
 use crate::utils::jwt::refresh_token;
 use axum::{Router, routing::delete, routing::get, routing::post, routing::put};
 use sqlx::PgPool;
 
-pub fn create_router(pool: PgPool) -> Router<()> {
+pub fn create_router(state: AppState) -> Router<()> {
     Router::new()
         .route("/api/v1/auth/refresh", post(refresh_token))
+        .route("/ping", get(ping_handler))
         .route("/api/v1/users/login", post(login_user))
         .route("/api/v1/users/register", post(register_user))
         .route("/api/v1/users/followers/:target_id", get(get_followers))
@@ -57,5 +59,5 @@ pub fn create_router(pool: PgPool) -> Router<()> {
             get(get_likes).post(like_post).delete(unlike_post),
         )
         .route("/api/v1/posts/likes/check/:target_id", get(check_user_like))
-        .with_state(pool)
+        .with_state(state)
 }
