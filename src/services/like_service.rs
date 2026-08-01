@@ -80,13 +80,24 @@ pub async fn like_post(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let likes_cache_key = crate::utils::cache::keys::post_likes(post_id);
-    let _ = state.cache.delete(&likes_cache_key).await;
-
     let user_liked_key = crate::utils::cache::keys::user_liked_post(user_id, post_id);
-    let _ = state.cache.delete(&user_liked_key).await;
-
     let post_cache_key = crate::utils::cache::keys::post(post_id);
-    let _ = state.cache.delete(&post_cache_key).await;
+
+    let (likes_result, user_liked_result, post_result) = tokio::join!(
+        state.cache.delete(&likes_cache_key),
+        state.cache.delete(&user_liked_key),
+        state.cache.delete(&post_cache_key),
+    );
+
+    if let Err(e) = likes_result {
+        eprintln!("Failed to delete likes cache: {}", e);
+    }
+    if let Err(e) = user_liked_result {
+        eprintln!("Failed to delete user liked cache: {}", e);
+    }
+    if let Err(e) = post_result {
+        eprintln!("Failed to delete post cache: {}", e);
+    }
 
     Ok(Json(like))
 }
@@ -135,13 +146,24 @@ pub async fn unlike_post(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let likes_cache_key = crate::utils::cache::keys::post_likes(post_id);
-    let _ = state.cache.delete(&likes_cache_key).await;
-
     let user_liked_key = crate::utils::cache::keys::user_liked_post(user_id, post_id);
-    let _ = state.cache.delete(&user_liked_key).await;
-
     let post_cache_key = crate::utils::cache::keys::post(post_id);
-    let _ = state.cache.delete(&post_cache_key).await;
+
+    let (likes_result, user_liked_result, post_result) = tokio::join!(
+        state.cache.delete(&likes_cache_key),
+        state.cache.delete(&user_liked_key),
+        state.cache.delete(&post_cache_key),
+    );
+
+    if let Err(e) = likes_result {
+        eprintln!("Failed to delete likes cache: {}", e);
+    }
+    if let Err(e) = user_liked_result {
+        eprintln!("Failed to delete user liked cache: {}", e);
+    }
+    if let Err(e) = post_result {
+        eprintln!("Failed to delete post cache: {}", e);
+    }
 
     Ok(Json(json!({ "message": "Post unliked successfully" })))
 }
@@ -166,22 +188,12 @@ pub async fn get_likes(
         return Ok(Json(cached_data));
     }
 
-    let post_exists =
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM posts WHERE id = $1)")
-            .bind(post_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    if !post_exists {
-        return Err((StatusCode::NOT_FOUND, "Post not found".to_string()));
-    }
-
-    let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM likes WHERE post_id = $1")
+    let count = sqlx::query_scalar::<_, i64>("SELECT likes_count FROM posts WHERE id = $1")
         .bind(post_id)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Post not found".to_string()))?;
 
     let response = json!({ "post_id": post_id, "likes": count });
 

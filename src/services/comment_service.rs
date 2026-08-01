@@ -54,13 +54,23 @@ pub async fn post_comment(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let _ = state
-        .cache
-        .invalidate_pattern(&format!("comments:{}:*", post_id))
-        .await;
-
+    let comments_pattern = format!("comments:{}:*", post_id);
     let post_cache_key = crate::utils::cache::keys::post(post_id);
-    let _ = state.cache.delete(&post_cache_key).await;
+
+    let (comments_result, post_result) = tokio::join!(
+        state.cache.invalidate_pattern(&comments_pattern),
+        state.cache.delete(&post_cache_key),
+    );
+
+    if let Err(e) = comments_result {
+        eprintln!(
+            "Failed to invalidate comments cache for post {}: {}",
+            post_id, e
+        );
+    }
+    if let Err(e) = post_result {
+        eprintln!("Failed to delete post cache for {}: {}", post_id, e);
+    }
 
     Ok(Json(json!({ "message": "Comment posted successfully" })))
 }
@@ -137,7 +147,7 @@ pub async fn get_comments(
 pub async fn delete_comment(
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
     State(state): State<AppState>,
-    Path((_post_id, comment_id)): Path<(Uuid, Uuid)>,
+    Path((post_id, comment_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let pool = &state.db;
     let claims = verify_auth_token(TypedHeader(auth))
@@ -147,12 +157,14 @@ pub async fn delete_comment(
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
 
-    let result = sqlx::query("DELETE FROM comments WHERE id = $1 AND user_id = $2")
-        .bind(comment_id)
-        .bind(user_id)
-        .execute(pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let result =
+        sqlx::query("DELETE FROM comments WHERE id = $1 AND user_id = $2 AND post_id = $3")
+            .bind(comment_id)
+            .bind(user_id)
+            .bind(post_id)
+            .execute(pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if result.rows_affected() == 0 {
         return Err((
@@ -160,10 +172,24 @@ pub async fn delete_comment(
             "Comment not found or you don't have permission to delete it".to_string(),
         ));
     }
-    let _ = state.cache.invalidate_pattern("comments:*:*").await;
 
-    let comment_cache_key = format!("comment:{}", comment_id);
-    let _ = state.cache.delete(&comment_cache_key).await;
+    let comments_pattern = format!("comments:{}:*", post_id);
+    let post_cache_key = crate::utils::cache::keys::post(post_id);
+
+    let (invalidate_result, delete_result) = tokio::join!(
+        state.cache.invalidate_pattern(&comments_pattern),
+        state.cache.delete(&post_cache_key),
+    );
+
+    if let Err(e) = invalidate_result {
+        eprintln!(
+            "Failed to invalidate comments cache for post {}: {}",
+            post_id, e
+        );
+    }
+    if let Err(e) = delete_result {
+        eprintln!("Failed to delete post cache for {}: {}", post_id, e);
+    }
 
     Ok(Json(json!({ "message": "Comment deleted successfully" })))
 }
