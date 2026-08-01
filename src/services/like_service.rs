@@ -1,3 +1,4 @@
+use crate::AppState;
 use crate::models::like_model::Like;
 use crate::utils::jwt::verify_auth_token;
 use axum::extract::Path;
@@ -5,15 +6,17 @@ use axum::{Json, extract::State, http::StatusCode};
 use axum_extra::TypedHeader;
 use axum_extra::headers::Authorization;
 use axum_extra::headers::authorization::Bearer;
+use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 pub async fn like_post(
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     Path(post_id): Path<Uuid>,
 ) -> Result<Json<Like>, (StatusCode, String)> {
+    let pool = &state.db;
     let claims = verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
@@ -25,16 +28,29 @@ pub async fn like_post(
         )
     })?;
 
+    let like_status_key = crate::utils::cache::keys::user_like_status(user_id, post_id);
+    if let Ok(Some(true)) = state.cache.get::<bool>(&like_status_key).await {
+        return Err((StatusCode::CONFLICT, "Already liked".to_string()));
+    }
+
     let already_liked = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM likes WHERE user_id = $1 AND post_id = $2)",
     )
     .bind(user_id)
     .bind(post_id)
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if already_liked {
+        let _ = state
+            .cache
+            .set(
+                &like_status_key,
+                &true,
+                Some(Duration::seconds(60).to_std().unwrap()),
+            )
+            .await;
         return Err((StatusCode::CONFLICT, "Already liked".to_string()));
     }
 
@@ -88,9 +104,10 @@ pub async fn like_post(
 
 pub async fn unlike_post(
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     Path(post_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let pool = &state.db;
     let claims = verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
@@ -153,9 +170,10 @@ pub async fn unlike_post(
 
 pub async fn get_likes(
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     Path(post_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let pool = &state.db;
     verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
@@ -177,14 +195,29 @@ pub async fn get_likes(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Post not found".to_string()))?;
 
-    Ok(Json(json!({ "post_id": post_id, "likes": count })))
+    let response = json!({ "post_id": post_id, "likes": count });
+
+    if let Err(e) = state
+        .cache
+        .set(
+            &cache_key,
+            &response,
+            Some(Duration::seconds(60).to_std().unwrap()),
+        )
+        .await
+    {
+        eprintln!("Failed to cache likes count: {}", e);
+    }
+
+    Ok(Json(response))
 }
 
 pub async fn check_user_like(
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     Path(post_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let pool = &state.db;
     let claims = verify_auth_token(TypedHeader(auth))
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
@@ -196,10 +229,20 @@ pub async fn check_user_like(
         )
     })?;
 
+    let cache_key = crate::utils::cache::keys::user_like_status(user_id, post_id);
+    if let Some(cached_liked) = state
+        .cache
+        .get::<bool>(&cache_key)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        return Ok(Json(json!({ "post_id": post_id, "liked": cached_liked })));
+    }
+
     let post_exists =
         sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM posts WHERE id = $1)")
             .bind(post_id)
-            .fetch_one(&pool)
+            .fetch_one(pool)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -212,9 +255,21 @@ pub async fn check_user_like(
     )
     .bind(user_id)
     .bind(post_id)
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if let Err(e) = state
+        .cache
+        .set(
+            &cache_key,
+            &liked,
+            Some(Duration::seconds(60).to_std().unwrap()),
+        )
+        .await
+    {
+        eprintln!("Failed to cache like status: {}", e);
+    }
 
     Ok(Json(json!({ "post_id": post_id, "liked": liked })))
 }
