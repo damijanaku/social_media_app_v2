@@ -49,7 +49,7 @@ pub async fn post_comment(
         }
     })?;
 
-    let comments_pattern = format!("comments:{}:*", post_id);
+    let comments_pattern = format!("comments:post:{}:*", post_id);
     let post_cache_key = crate::utils::cache::keys::post(post_id);
 
     let (comments_result, post_result) = tokio::join!(
@@ -86,9 +86,9 @@ pub async fn get_comments(
     let include_count = pagination.include_count();
 
     let cache_key = if include_count {
-        format!("comments:{}:p{}:l{}:with_count", post_id, page, limit)
+        crate::utils::cache::keys::post_comments_with_count(post_id, page as u32, limit as u32)
     } else {
-        format!("comments:{}:p{}:l{}", post_id, page, limit)
+        crate::utils::cache::keys::post_comments(post_id, page as u32, limit as u32)
     };
 
     if let Some(cached_data) = state
@@ -190,7 +190,7 @@ pub async fn delete_comment(
         ));
     }
 
-    let comments_pattern = format!("comments:{}:*", post_id);
+    let comments_pattern = format!("comments:post:{}:*", post_id);
     let post_cache_key = crate::utils::cache::keys::post(post_id);
 
     let (invalidate_result, delete_result) = tokio::join!(

@@ -6,7 +6,8 @@ edition = "2024"
 [dependencies]
 axum = "0.7"
 axum-extra = { version = "0.9", features = ["typed-header"] }  
-headers = "0.4" 
+headers = "0.4"
+mimalloc = { version = "0.1", default-features = false }
 
 sqlx = { version = "0.7", features = [
     "runtime-tokio-rustls",
@@ -41,6 +42,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 reqwest = { version = "0.11", features = ["rustls-tls"], default-features = false }
+futures = "0.3.33"
 
 [profile.release]
 lto = "fat"

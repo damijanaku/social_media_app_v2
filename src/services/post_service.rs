@@ -150,19 +150,37 @@ pub async fn delete_post(
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
 
-    let post = sqlx::query_as::<_, Post>("SELECT * FROM posts WHERE id = $1")
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
+
+    // Verify ownership before opening a transaction
+    let post = sqlx::query_as::<_, Post>("SELECT * FROM posts WHERE id = $1 AND user_id = $2")
         .bind(target_id)
+        .bind(user_id)
         .fetch_optional(pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Post not found".to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    if post.user_id.to_string() != claims.sub {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Unauthorized to delete this post".to_string(),
-        ));
-    }
+    let post = match post {
+        Some(p) => p,
+        None => {
+            let exists =
+                sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM posts WHERE id = $1)")
+                    .bind(target_id)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+            return Err(if exists {
+                (
+                    StatusCode::FORBIDDEN,
+                    "Unauthorized to delete this post".to_string(),
+                )
+            } else {
+                (StatusCode::NOT_FOUND, "Post not found".to_string())
+            });
+        }
+    };
 
     let mut tx = pool
         .begin()
@@ -194,13 +212,17 @@ pub async fn delete_post(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let cache_key = crate::utils::cache::keys::post(target_id);
-    let _ = state.cache.delete(&cache_key).await;
+    // Scope feed invalidation to the post owner only — not all users globally
+    let feed_pattern = format!("feed:{}:*", post.user_id);
+    let user_posts_pattern = format!("user:posts:{}:*", post.user_id);
+    let comments_pattern = format!("comments:{}:*", target_id);
 
-    let _ = state
-        .cache
-        .invalidate_pattern(&format!("user:posts:{}:*", post.user_id))
-        .await;
-    let _ = state.cache.invalidate_pattern(&format!("feed:*:*")).await;
+    let _ = tokio::join!(
+        state.cache.delete(&cache_key),
+        state.cache.invalidate_pattern(&feed_pattern),
+        state.cache.invalidate_pattern(&user_posts_pattern),
+        state.cache.invalidate_pattern(&comments_pattern),
+    );
 
     Ok(Json(json!({
         "message": "Post deleted successfully",

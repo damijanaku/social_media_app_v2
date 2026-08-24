@@ -1,3 +1,6 @@
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod models;
 mod routemount;
 mod services;
@@ -12,9 +15,7 @@ use std::error::Error;
 use std::fs;
 use std::time::Duration;
 use tower::ServiceBuilder;
-use tower_http::{
-    compression::CompressionLayer, limit::RequestBodyLimitLayer, timeout::TimeoutLayer,
-};
+use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 use utils::cache::CacheService;
 
 #[derive(Clone)]
@@ -103,8 +104,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .layer(ServiceBuilder::new().layer(TimeoutLayer::new(Duration::from_secs(30))))
         .layer(
             ServiceBuilder::new().layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)), // 10MB
-        )
-        .layer(ServiceBuilder::new().layer(CompressionLayer::new().gzip(true).br(true)));
+        );
 
     let app = if !is_production {
         app.layer(
@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     if !is_production {
-        println!("ogging middleware enabled for development");
+        println!("Logging middleware enabled for development");
     } else {
         println!("Logging middleware disabled for production performance");
     }
@@ -131,7 +131,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if !is_production {
         println!("Health check: http://localhost:{}/health", port);
     }
-    println!("Compression enabled");
+    println!("Compression disabled for better performance");
 
     axum::serve(listener, app).await?;
 
