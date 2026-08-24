@@ -52,14 +52,32 @@ impl CacheService {
 
     pub async fn invalidate_pattern(&self, pattern: &str) -> Result<(), String> {
         let mut conn = self.pool.get().await.map_err(|e| e.to_string())?;
-        let keys: Vec<String> = conn.keys(pattern).await.map_err(|e| e.to_string())?;
-        if !keys.is_empty() {
-            let _: () = conn.del(keys).await.map_err(|e| e.to_string())?;
+        let mut cursor: u64 = 0;
+
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = deadpool_redis::redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(100u32)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            if !keys.is_empty() {
+                let _: () = conn.del(keys).await.map_err(|e| e.to_string())?;
+            }
+
+            cursor = next_cursor;
+            if cursor == 0 {
+                break;
+            }
         }
+
         Ok(())
     }
 }
-
 pub mod keys {
     use uuid::Uuid;
 
@@ -117,6 +135,10 @@ pub mod keys {
 
     pub fn post_comments(post_id: Uuid, page: u32, limit: u32) -> String {
         format!("comments:post:{}:p{}:l{}", post_id, page, limit)
+    }
+
+    pub fn post_comments_with_count(post_id: Uuid, page: u32, limit: u32) -> String {
+        format!("comments:post:{}:p{}:l{}:with_count", post_id, page, limit)
     }
 
     pub fn user_liked_post(user_id: Uuid, post_id: Uuid) -> String {

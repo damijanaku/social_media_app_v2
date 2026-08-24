@@ -30,17 +30,6 @@ pub async fn post_comment(
         )
     })?;
 
-    let post_exists =
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM posts WHERE id = $1)")
-            .bind(post_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    if !post_exists {
-        return Err((StatusCode::NOT_FOUND, "Post not found".to_string()));
-    }
-
     sqlx::query(
         "INSERT INTO comments (id, post_id, user_id, body, created_at)
          VALUES ($1, $2, $3, $4, $5)",
@@ -52,9 +41,15 @@ pub async fn post_comment(
     .bind(Utc::now())
     .execute(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| {
+        if e.to_string().contains("foreign key") {
+            (StatusCode::NOT_FOUND, "Post not found".to_string())
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
+    })?;
 
-    let comments_pattern = format!("comments:{}:*", post_id);
+    let comments_pattern = format!("comments:post:{}:*", post_id);
     let post_cache_key = crate::utils::cache::keys::post(post_id);
 
     let (comments_result, post_result) = tokio::join!(
@@ -86,10 +81,16 @@ pub async fn get_comments(
         .await
         .map_err(|status| (status, "Unauthorized".to_string()))?;
 
-    let limit = pagination.limit.unwrap_or(10);
-    let page = pagination.page.unwrap_or(1);
+    let (page, limit) = pagination.resolve();
+    let fetch_limit = pagination.fetch_limit();
+    let include_count = pagination.include_count();
 
-    let cache_key = crate::utils::cache::keys::post_comments(post_id, page as u32, limit as u32);
+    let cache_key = if include_count {
+        crate::utils::cache::keys::post_comments_with_count(post_id, page as u32, limit as u32)
+    } else {
+        crate::utils::cache::keys::post_comments(post_id, page as u32, limit as u32)
+    };
+
     if let Some(cached_data) = state
         .cache
         .get::<serde_json::Value>(&cache_key)
@@ -99,35 +100,51 @@ pub async fn get_comments(
         return Ok(Json(cached_data));
     }
 
-    let offset = (page - 1) * limit;
-
     let comments = sqlx::query_as::<_, Comment>(
         "SELECT * FROM comments 
          WHERE post_id = $1 
          ORDER BY created_at DESC 
-         LIMIT $2 OFFSET $3",
+         LIMIT $2",
     )
     .bind(post_id)
-    .bind(limit)
-    .bind(offset)
+    .bind(fetch_limit)
     .fetch_all(pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM comments WHERE post_id = $1")
-        .bind(post_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let has_more = comments.len() > limit as usize;
+    let comments = comments
+        .into_iter()
+        .take(limit as usize)
+        .collect::<Vec<_>>();
 
-    let response = json!({
-        "comments": comments,
-        "meta": {
-            "total_items": total_count,
-            "page": page,
-            "limit": limit
-        }
-    });
+    let response = if include_count {
+        let total_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM comments WHERE post_id = $1")
+                .bind(post_id)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        json!({
+            "comments": comments,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more,
+                "total_items": total_count
+            }
+        })
+    } else {
+        json!({
+            "comments": comments,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more
+            }
+        })
+    };
 
     if let Err(e) = state
         .cache
@@ -173,7 +190,7 @@ pub async fn delete_comment(
         ));
     }
 
-    let comments_pattern = format!("comments:{}:*", post_id);
+    let comments_pattern = format!("comments:post:{}:*", post_id);
     let post_cache_key = crate::utils::cache::keys::post(post_id);
 
     let (invalidate_result, delete_result) = tokio::join!(

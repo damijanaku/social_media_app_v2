@@ -1,14 +1,21 @@
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod models;
 mod routemount;
 mod services;
 mod utils;
 
+use axum::Router;
 use deadpool_redis::{Config as RedisConfig, Runtime};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::error::Error;
 use std::fs;
+use std::time::Duration;
+use tower::ServiceBuilder;
+use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 use utils::cache::CacheService;
 
 #[derive(Clone)]
@@ -41,7 +48,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
         format!(
-            "postgresql://{}:{}@{}:{}/{}?sslmode=prefer&schema=public",
+            "postgresql://{}:{}@{}:{}/{}?sslmode=disable",
             db_user, db_pass, db_host, db_port, db_name
         )
     });
@@ -53,6 +60,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)
+        .min_connections(max_connections / 2)
+        .acquire_timeout(Duration::from_secs(5))
+        .idle_timeout(Duration::from_secs(600))
+        .max_lifetime(Duration::from_secs(1800))
+        .test_before_acquire(false)
         .connect(&database_url)
         .await
         .expect("Failed to connect to the database pool");
@@ -88,6 +100,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let app = crate::routemount::route::create_router(state);
 
+    let app = app
+        .layer(ServiceBuilder::new().layer(TimeoutLayer::new(Duration::from_secs(30))))
+        .layer(
+            ServiceBuilder::new().layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)), // 10MB
+        );
+
+    let app = if !is_production {
+        app.layer(
+            tower_http::trace::TraceLayer::new_for_http()
+                .make_span_with(tower_http::trace::DefaultMakeSpan::new())
+                .on_response(tower_http::trace::DefaultOnResponse::new()),
+        )
+    } else {
+        app
+    };
+
+    if !is_production {
+        println!("Logging middleware enabled for development");
+    } else {
+        println!("Logging middleware disabled for production performance");
+    }
+
     let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     let addr = format!("0.0.0.0:{}", port);
 
@@ -97,6 +131,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if !is_production {
         println!("Health check: http://localhost:{}/health", port);
     }
+    println!("Compression disabled for better performance");
 
     axum::serve(listener, app).await?;
 

@@ -4,22 +4,53 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] } 
-serde = { version = "1.0", features = ["derive"] } 
 axum = "0.7"
-jsonwebtoken = "9.3.1"
+axum-extra = { version = "0.9", features = ["typed-header"] }  
+headers = "0.4"
+mimalloc = { version = "0.1", default-features = false }
+
+sqlx = { version = "0.7", features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+    "migrate",
+    "macros",
+] }
+
+tokio = { version = "1", features = ["full"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
 chrono = { version = "0.4", features = ["serde"] }
-bcrypt = "0.19.0"
-serde_json = "1.0.149"
-axum-extra = {version = "0.9", features = [ "typed-header" ] }
-futures = "0.3.32"
-sqlx = { version = "0.7.4", features = ["runtime-tokio-native-tls", "postgres", "chrono", "uuid"] }
-uuid = { version = "1.6", features = ["v4", "serde"] }
-reqwest = "0.11"
-dotenvy = "0.15.7"
-deadpool-redis = { version = "0.18", features = ["rt_tokio_1"] }
-blake3 = "1.5"
 
+uuid = { version = "1", features = ["v4", "serde"] }
 
-[dev-dependencies]
-sqlx-cli = "0.7"
+tower-http = { version = "0.5", features = ["compression-full", "timeout", "limit", "sensitive-headers", "trace"] }
+tower = "0.4"
+
+bcrypt = "0.15"
+jsonwebtoken = "9"
+
+dotenvy = "0.15"
+
+deadpool-redis = { version = "0.14", features = ["serde"] }
+redis = { version = "0.25", features = ["tokio-comp", "tokio-rustls-comp"] }
+
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+reqwest = { version = "0.11", features = ["rustls-tls"], default-features = false }
+futures = "0.3.33"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3
+
+[profile.dev]
+opt-level = 0
+debug = true

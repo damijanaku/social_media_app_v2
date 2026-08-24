@@ -84,7 +84,10 @@ pub async fn register_user(
         ));
     }
 
-    let hashed = hash(&payload.password, 12)
+    let password = payload.password.clone();
+    let hashed = tokio::task::spawn_blocking(move || hash(&password, 12))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let user = sqlx::query_as::<_, User>(
@@ -129,7 +132,11 @@ pub async fn login_user(
             "Wrong username or password".to_string(),
         ))?;
 
-    let valid = verify(&payload.password, &user.password_hash)
+    let password = payload.password.clone();
+    let password_hash = user.password_hash.clone();
+    let valid = tokio::task::spawn_blocking(move || verify(&password, &password_hash))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if !valid {
@@ -171,49 +178,63 @@ pub async fn my_profile(
 
     let user_id = Uuid::parse_str(&claims.sub).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let limit = pagination.limit.unwrap_or(10);
-    let page = pagination.page.unwrap_or(1);
+    let (page, limit) = pagination.resolve();
+    let offset = pagination.offset();
+    let fetch_limit = pagination.fetch_limit();
 
-    let cache_key = format!("user:profile:{}:p{}:l{}", user_id, page, limit);
+    let cache_key =
+        crate::utils::cache::keys::user_profile_with_posts(user_id, page as u32, limit as u32);
     if let Ok(Some(cached_data)) = state.cache.get::<serde_json::Value>(&cache_key).await {
         return Ok(Json(cached_data));
     }
 
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let (user, posts, total_posts) = tokio::try_join!(
+        async {
+            sqlx::query_as::<_, UserResponse>(
+                "SELECT id, username, email, name, birthday, created_at 
+                 FROM users 
+                 WHERE id = $1",
+            )
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)
+        },
+        async {
+            sqlx::query_as::<_, Post>(
+                "SELECT * FROM posts 
+                 WHERE user_id = $1 
+                 ORDER BY created_at DESC
+                 LIMIT $2 OFFSET $3",
+            )
+            .bind(user_id)
+            .bind(fetch_limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        },
+        async {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM posts WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(pool)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    )?;
 
-    let offset = (page - 1) * limit;
-
-    let posts = sqlx::query_as::<_, Post>(
-        "SELECT * FROM posts 
-         WHERE user_id = $1 
-         ORDER BY created_at DESC
-         LIMIT $2 OFFSET $3",
-    )
-    .bind(user_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let total_posts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM posts WHERE user_id = $1")
-        .bind(user_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let has_more = posts.len() > limit as usize;
+    let posts = posts.into_iter().take(limit as usize).collect::<Vec<_>>();
 
     let response = json!({
-        "user": UserResponse::from(user),
+        "user": user,
         "posts": posts,
         "meta": {
-            "total_items": total_posts,
             "page": page,
-            "limit": limit
+            "limit": limit,
+            "has_more": has_more,
+            "total_items": total_posts
         }
     });
 
@@ -241,49 +262,63 @@ pub async fn profile(
     let pool = &state.db;
     verify_auth_token(TypedHeader(auth)).await?;
 
-    let limit = pagination.limit.unwrap_or(10);
-    let page = pagination.page.unwrap_or(1);
+    let (page, limit) = pagination.resolve();
+    let offset = pagination.offset();
+    let fetch_limit = pagination.fetch_limit();
 
-    let cache_key = format!("user:profile:{}:p{}:l{}", target_id, page, limit);
+    let cache_key =
+        crate::utils::cache::keys::user_profile_with_posts(target_id, page as u32, limit as u32);
     if let Ok(Some(cached_data)) = state.cache.get::<serde_json::Value>(&cache_key).await {
         return Ok(Json(cached_data));
     }
 
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
-        .bind(target_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let (user, posts, total_posts) = tokio::try_join!(
+        async {
+            sqlx::query_as::<_, UserResponse>(
+                "SELECT id, username, email, name, birthday, created_at 
+                 FROM users 
+                 WHERE id = $1",
+            )
+            .bind(target_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)
+        },
+        async {
+            sqlx::query_as::<_, Post>(
+                "SELECT * FROM posts 
+                 WHERE user_id = $1 
+                 ORDER BY created_at DESC
+                 LIMIT $2 OFFSET $3",
+            )
+            .bind(target_id)
+            .bind(fetch_limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        },
+        async {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM posts WHERE user_id = $1")
+                .bind(target_id)
+                .fetch_one(pool)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    )?;
 
-    let offset = (page - 1) * limit;
-
-    let posts = sqlx::query_as::<_, Post>(
-        "SELECT * FROM posts 
-         WHERE user_id = $1 
-         ORDER BY created_at DESC
-         LIMIT $2 OFFSET $3",
-    )
-    .bind(target_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let total_posts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM posts WHERE user_id = $1")
-        .bind(target_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let has_more = posts.len() > limit as usize;
+    let posts = posts.into_iter().take(limit as usize).collect::<Vec<_>>();
 
     let response = json!({
-        "user": UserResponse::from(user),
+        "user": user,
         "posts": posts,
         "meta": {
-            "total_items": total_posts,
             "page": page,
-            "limit": limit
+            "limit": limit,
+            "has_more": has_more,
+            "total_items": total_posts
         }
     });
 
@@ -301,7 +336,6 @@ pub async fn profile(
 
     Ok(Json(response))
 }
-
 pub async fn get_user(
     State(state): State<AppState>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
@@ -312,7 +346,7 @@ pub async fn get_user(
         .await
         .map_err(|status| (status, "Unauthorized access".to_string()))?;
 
-    let cache_key = format!("user:{}", target_id);
+    let cache_key = crate::utils::cache::keys::user(target_id);
     if let Some(cached_user) = state
         .cache
         .get::<UserResponse>(&cache_key)
@@ -322,20 +356,21 @@ pub async fn get_user(
         return Ok(Json(cached_user));
     }
 
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
-        .bind(target_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
-
-    let response = UserResponse::from(user);
+    let user = sqlx::query_as::<_, UserResponse>(
+        "SELECT id, username, email, name, birthday, created_at 
+         FROM users WHERE id = $1",
+    )
+    .bind(target_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
     if let Err(e) = state
         .cache
         .set(
             &cache_key,
-            &response,
+            &user,
             Some(Duration::seconds(300).to_std().unwrap()),
         )
         .await
@@ -343,7 +378,7 @@ pub async fn get_user(
         eprintln!("Failed to cache user: {}", e);
     }
 
-    Ok(Json(response))
+    Ok(Json(user))
 }
 
 pub async fn get_user_by_username(
@@ -356,7 +391,7 @@ pub async fn get_user_by_username(
         .await
         .map_err(|status| (status, "Unauthorized access".to_string()))?;
 
-    let cache_key = format!("user:username:{}", username);
+    let cache_key = crate::utils::cache::keys::user_by_username(&username);
     if let Some(cached_user) = state
         .cache
         .get::<UserResponse>(&cache_key)
@@ -366,20 +401,21 @@ pub async fn get_user_by_username(
         return Ok(Json(cached_user));
     }
 
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = $1")
-        .bind(&username)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
-
-    let response = UserResponse::from(user);
+    let user = sqlx::query_as::<_, UserResponse>(
+        "SELECT id, username, email, name, birthday, created_at 
+         FROM users WHERE username = $1",
+    )
+    .bind(&username)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
     if let Err(e) = state
         .cache
         .set(
             &cache_key,
-            &response,
+            &user,
             Some(Duration::seconds(300).to_std().unwrap()),
         )
         .await
@@ -387,7 +423,7 @@ pub async fn get_user_by_username(
         eprintln!("Failed to cache user by username: {}", e);
     }
 
-    Ok(Json(response))
+    Ok(Json(user))
 }
 
 pub async fn update_user(
@@ -433,7 +469,12 @@ pub async fn update_user(
     }
 
     let hashed_password = if let Some(ref pw) = payload.password {
-        Some(hash(pw, 12).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?)
+        let password = pw.clone();
+        let hashed = tokio::task::spawn_blocking(move || hash(&password, 12))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        Some(hashed)
     } else {
         None
     };
@@ -469,13 +510,13 @@ pub async fn update_user(
     })?
     .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    let cache_key = format!("user:{}", user_id);
+    let cache_key = crate::utils::cache::keys::user(user_id);
     if let Err(e) = state.cache.delete(&cache_key).await {
         eprintln!("Failed to invalidate user cache: {}", e);
     }
 
     if let Some(username) = &payload.username {
-        let username_key = format!("user:username:{}", username);
+        let username_key = crate::utils::cache::keys::user_by_username(username);
         if let Err(e) = state.cache.delete(&username_key).await {
             eprintln!("Failed to invalidate username cache: {}", e);
         }
@@ -828,10 +869,16 @@ pub async fn get_followers(
         .await
         .map_err(|status| (status, "Unauthorized access".to_string()))?;
 
-    let limit = pagination.limit.unwrap_or(10);
-    let page = pagination.page.unwrap_or(1);
+    let (page, limit) = pagination.resolve();
+    let fetch_limit = pagination.fetch_limit();
+    let include_count = pagination.include_count();
 
-    let cache_key = crate::utils::cache::keys::followers(target_id, page as u32, limit as u32);
+    let cache_key = if include_count {
+        format!("followers:{}:p{}:l{}:with_count", target_id, page, limit)
+    } else {
+        format!("followers:{}:p{}:l{}", target_id, page, limit)
+    };
+
     if let Some(cached_data) = state
         .cache
         .get::<serde_json::Value>(&cache_key)
@@ -841,39 +888,56 @@ pub async fn get_followers(
         return Ok(Json(cached_data));
     }
 
-    let offset = (page - 1) * limit;
+    let offset = pagination.offset();
 
-    let followers = sqlx::query_as::<_, User>(
-        "SELECT u.* FROM users u
+    let followers = sqlx::query_as::<_, UserResponse>(
+        "SELECT u.id, u.username, u.email, u.name, u.birthday, u.created_at 
+         FROM users u
          INNER JOIN follows f ON f.follower_id = u.id
          WHERE f.followed_id = $1
+         ORDER BY f.created_at DESC, u.id
          LIMIT $2 OFFSET $3",
     )
     .bind(target_id)
-    .bind(limit)
+    .bind(fetch_limit)
     .bind(offset)
     .fetch_all(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .into_iter()
-    .map(UserResponse::from)
-    .collect::<Vec<UserResponse>>();
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let total_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM follows WHERE followed_id = $1")
-            .bind(target_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let has_more = followers.len() > limit as usize;
+    let followers = followers
+        .into_iter()
+        .take(limit as usize)
+        .collect::<Vec<_>>();
 
-    let response = json!({
-        "followers": followers,
-        "meta": {
-            "total_items": total_count,
-            "page": page,
-            "limit": limit
-        }
-    });
+    let response = if include_count {
+        let total_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM follows WHERE followed_id = $1")
+                .bind(target_id)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        json!({
+            "followers": followers,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more,
+                "total_items": total_count
+            }
+        })
+    } else {
+        json!({
+            "followers": followers,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more
+            }
+        })
+    };
 
     if let Err(e) = state
         .cache
@@ -901,10 +965,16 @@ pub async fn get_following(
         .await
         .map_err(|status| (status, "Unauthorized access".to_string()))?;
 
-    let limit = pagination.limit.unwrap_or(10);
-    let page = pagination.page.unwrap_or(1);
+    let (page, limit) = pagination.resolve();
+    let fetch_limit = pagination.fetch_limit();
+    let include_count = pagination.include_count();
 
-    let cache_key = crate::utils::cache::keys::following(target_id, page as u32, limit as u32);
+    let cache_key = if include_count {
+        format!("following:{}:p{}:l{}:with_count", target_id, page, limit)
+    } else {
+        format!("following:{}:p{}:l{}", target_id, page, limit)
+    };
+
     if let Some(cached_data) = state
         .cache
         .get::<serde_json::Value>(&cache_key)
@@ -914,39 +984,56 @@ pub async fn get_following(
         return Ok(Json(cached_data));
     }
 
-    let offset = (page - 1) * limit;
+    let offset = pagination.offset();
 
-    let following = sqlx::query_as::<_, User>(
-        "SELECT u.* FROM users u
+    let following = sqlx::query_as::<_, UserResponse>(
+        "SELECT u.id, u.username, u.email, u.name, u.birthday, u.created_at 
+         FROM users u
          INNER JOIN follows f ON f.followed_id = u.id
          WHERE f.follower_id = $1
+         ORDER BY f.created_at DESC, u.id
          LIMIT $2 OFFSET $3",
     )
     .bind(target_id)
-    .bind(limit)
+    .bind(fetch_limit)
     .bind(offset)
     .fetch_all(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .into_iter()
-    .map(UserResponse::from)
-    .collect::<Vec<UserResponse>>();
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let total_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM follows WHERE follower_id = $1")
-            .bind(target_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let has_more = following.len() > limit as usize;
+    let following = following
+        .into_iter()
+        .take(limit as usize)
+        .collect::<Vec<_>>();
 
-    let response = json!({
-        "following": following,
-        "meta": {
-            "total_items": total_count,
-            "page": page,
-            "limit": limit
-        }
-    });
+    let response = if include_count {
+        let total_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM follows WHERE follower_id = $1")
+                .bind(target_id)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        json!({
+            "following": following,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more,
+                "total_items": total_count
+            }
+        })
+    } else {
+        json!({
+            "following": following,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more
+            }
+        })
+    };
 
     if let Err(e) = state
         .cache
@@ -976,10 +1063,16 @@ pub async fn get_my_followers(
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
 
-    let limit = pagination.limit.unwrap_or(10);
-    let page = pagination.page.unwrap_or(1);
+    let (page, limit) = pagination.resolve();
+    let fetch_limit = pagination.fetch_limit();
+    let include_count = pagination.include_count();
 
-    let cache_key = crate::utils::cache::keys::followers(user_id, page as u32, limit as u32);
+    let cache_key = if include_count {
+        format!("followers:{}:p{}:l{}:with_count", user_id, page, limit)
+    } else {
+        format!("followers:{}:p{}:l{}", user_id, page, limit)
+    };
+
     if let Some(cached_data) = state
         .cache
         .get::<serde_json::Value>(&cache_key)
@@ -989,47 +1082,56 @@ pub async fn get_my_followers(
         return Ok(Json(cached_data));
     }
 
-    let target_user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+    let offset = pagination.offset();
 
-    let offset = (page - 1) * limit;
-
-    let followers: Vec<UserResponse> = sqlx::query_as::<_, User>(
-        "SELECT u.* FROM users u
+    let followers: Vec<UserResponse> = sqlx::query_as::<_, UserResponse>(
+        "SELECT u.id, u.username, u.email, u.name, u.birthday, u.created_at 
+         FROM users u
          INNER JOIN follows f ON f.follower_id = u.id
          WHERE f.followed_id = $1
+         ORDER BY f.created_at DESC, u.id
          LIMIT $2 OFFSET $3",
     )
     .bind(user_id)
-    .bind(limit)
+    .bind(fetch_limit)
     .bind(offset)
     .fetch_all(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .into_iter()
-    .map(UserResponse::from)
-    .collect();
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let total_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM follows WHERE followed_id = $1")
-            .bind(user_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let has_more = followers.len() > limit as usize;
+    let followers = followers
+        .into_iter()
+        .take(limit as usize)
+        .collect::<Vec<_>>();
 
-    let response = json!({
-        "user": { "id": target_user.id, "username": target_user.username },
-        "followers": followers,
-        "meta": {
-            "total_items": total_count,
-            "page": page,
-            "limit": limit
-        }
-    });
+    let response = if include_count {
+        let total_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM follows WHERE followed_id = $1")
+                .bind(user_id)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        json!({
+            "followers": followers,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more,
+                "total_items": total_count
+            }
+        })
+    } else {
+        json!({
+            "followers": followers,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more
+            }
+        })
+    };
 
     if let Err(e) = state
         .cache
@@ -1043,18 +1145,20 @@ pub async fn get_my_followers(
         eprintln!("Failed to cache followers: {}", e);
     }
 
-    let count_cache_key = crate::utils::cache::keys::follower_count(user_id);
-    let count_response = json!({ "count": total_count });
-    if let Err(e) = state
-        .cache
-        .set(
-            &count_cache_key,
-            &count_response,
-            Some(Duration::seconds(60).to_std().unwrap()),
-        )
-        .await
-    {
-        eprintln!("Failed to cache follower count: {}", e);
+    if include_count {
+        let count_cache_key = crate::utils::cache::keys::follower_count(user_id);
+        let count_response = json!({ "count": response["meta"]["total_items"] });
+        if let Err(e) = state
+            .cache
+            .set(
+                &count_cache_key,
+                &count_response,
+                Some(Duration::seconds(60).to_std().unwrap()),
+            )
+            .await
+        {
+            eprintln!("Failed to cache follower count: {}", e);
+        }
     }
 
     Ok(Json(response))
@@ -1073,10 +1177,16 @@ pub async fn get_my_following(
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
 
-    let limit = pagination.limit.unwrap_or(10);
-    let page = pagination.page.unwrap_or(1);
+    let (page, limit) = pagination.resolve();
+    let fetch_limit = pagination.fetch_limit();
+    let include_count = pagination.include_count();
 
-    let cache_key = crate::utils::cache::keys::following(user_id, page as u32, limit as u32);
+    let cache_key = if include_count {
+        format!("following:{}:p{}:l{}:with_count", user_id, page, limit)
+    } else {
+        format!("following:{}:p{}:l{}", user_id, page, limit)
+    };
+
     if let Some(cached_data) = state
         .cache
         .get::<serde_json::Value>(&cache_key)
@@ -1086,47 +1196,56 @@ pub async fn get_my_following(
         return Ok(Json(cached_data));
     }
 
-    let target_user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+    let offset = pagination.offset();
 
-    let offset = (page - 1) * limit;
-
-    let following: Vec<UserResponse> = sqlx::query_as::<_, User>(
-        "SELECT u.* FROM users u
+    let following: Vec<UserResponse> = sqlx::query_as::<_, UserResponse>(
+        "SELECT u.id, u.username, u.email, u.name, u.birthday, u.created_at 
+         FROM users u
          INNER JOIN follows f ON f.followed_id = u.id
          WHERE f.follower_id = $1
+         ORDER BY f.created_at DESC, u.id
          LIMIT $2 OFFSET $3",
     )
     .bind(user_id)
-    .bind(limit)
+    .bind(fetch_limit)
     .bind(offset)
     .fetch_all(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .into_iter()
-    .map(UserResponse::from)
-    .collect();
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let total_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM follows WHERE follower_id = $1")
-            .bind(user_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let has_more = following.len() > limit as usize;
+    let following = following
+        .into_iter()
+        .take(limit as usize)
+        .collect::<Vec<_>>();
 
-    let response = json!({
-        "user": { "id": target_user.id, "username": target_user.username },
-        "following": following,
-        "meta": {
-            "total_items": total_count,
-            "page": page,
-            "limit": limit
-        }
-    });
+    let response = if include_count {
+        let total_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM follows WHERE follower_id = $1")
+                .bind(user_id)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        json!({
+            "following": following,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more,
+                "total_items": total_count
+            }
+        })
+    } else {
+        json!({
+            "following": following,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "has_more": has_more
+            }
+        })
+    };
 
     if let Err(e) = state
         .cache
@@ -1140,23 +1259,24 @@ pub async fn get_my_following(
         eprintln!("Failed to cache following: {}", e);
     }
 
-    let count_cache_key = crate::utils::cache::keys::following_count(user_id);
-    let count_response = json!({ "count": total_count });
-    if let Err(e) = state
-        .cache
-        .set(
-            &count_cache_key,
-            &count_response,
-            Some(Duration::seconds(60).to_std().unwrap()),
-        )
-        .await
-    {
-        eprintln!("Failed to cache following count: {}", e);
+    if include_count {
+        let count_cache_key = crate::utils::cache::keys::following_count(user_id);
+        let count_response = json!({ "count": response["meta"]["total_items"] });
+        if let Err(e) = state
+            .cache
+            .set(
+                &count_cache_key,
+                &count_response,
+                Some(Duration::seconds(60).to_std().unwrap()),
+            )
+            .await
+        {
+            eprintln!("Failed to cache following count: {}", e);
+        }
     }
 
     Ok(Json(response))
 }
-
 pub async fn check_follow_status(
     State(state): State<AppState>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
